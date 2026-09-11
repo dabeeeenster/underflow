@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 apps.yaml
 .DS_Store
+data/

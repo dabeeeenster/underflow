@@ -5,7 +5,16 @@ underflow:
   dry_run: true              # stage 0: observe and publish only, never write
   interval_minutes: 30
   status_entity: sensor.underflow
+  plan_entity: sensor.underflow_planned_min_flow
   friendly_name: underflow heat pump controller
+  write_script: script/set_min_flow_temp      # only used when dry_run is false
+  planner:
+    baseline: 20        # °C, curve only
+    boost: 32           # °C, min flow in cheap slots
+    cheap_fraction: 0.33
+    horizon_hours: 24
+    comfort_min: 20.5   # room mean below this -> boost regardless of price
+    comfort_max: 22.5   # room mean above this -> baseline regardless of price
   entities:
     weather: weather.met_office_home          # any weather entity with a `temperature` attribute
     outside_179: sensor.ebusd_outsidetemp      # the heat pump's own outside sensor (for comparison)
@@ -19,4 +28,6 @@ underflow:
     min_flow: number.ebusd_hc1minflowtempdesired      # the lever
     max_flow: number.ebusd_hc1maxflowtempdesired
     agile_rate: sensor.octopus_energy_electricity_xxx_current_rate
+    agile_rates_today: event.octopus_energy_electricity_xxx_current_day_rates      # `rates` attribute
+    agile_rates_tomorrow: event.octopus_energy_electricity_xxx_next_day_rates
     pump_status: sensor.ebusd_hmu_rundatastatuscode

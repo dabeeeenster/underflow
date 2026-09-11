@@ -54,12 +54,43 @@ work. They remain the comfort sensors.
 
 ## Roadmap
 
-| Stage | What | When (author's house) |
+| Stage | What | Status (author's house) |
 |---|---|---|
-| 0 | Observe: publish all model inputs as `sensor.underflow`, write nothing | **done, Sep 2026** |
-| 1 | Rule-based Agile shifting: raise min flow in the cheapest third of slots, floor it in the dearest, inside a comfort band | Oct 2026 |
-| 2 | Fit the house and COP models; publish a 24 h room-temperature prediction and check it against reality | Nov 2026 |
-| 3 | Optimise min flow per half-hour | Dec 2026 |
+| 0 | Observe: publish all model inputs as `sensor.underflow`, write nothing | **live, Sep 2026** |
+| 1 | Rule-based Agile shifting (`planner.py`): boost min flow in the cheapest third of upcoming slots, baseline otherwise, comfort band overrides | **built and running in dry run**; publishes `sensor.underflow_planned_min_flow`. Goes live Oct 2026 |
+| 2 | House + COP models (`model.py`): 2R2C fit, Kalman filter, Carnot-fraction COP | **built and tested on synthetic data**; real fit needs a month of heating data (Nov 2026) |
+| 3 | Optimise min flow per half-hour (dynamic programme over slab temperature) | Dec 2026 |
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `underflow.py` | The AppDaemon app: observe every 30 min, run the planner, publish sensors, optionally call the write script |
+| `planner.py` | Stage 1 rules. Pure functions, no HA dependency |
+| `model.py` | Stage 2 physics: `HouseModel`, `fit_house`, `KalmanFilter`, `CopModel`, `fit_cop`, `flow_target` |
+| `tests/test_model.py` | Synthetic recovery test: generates two weeks from known parameters, fits, checks recovery within a few %, checks a 24 h forecast, fits COP on a real hot-water run |
+| `tests/test_planner.py` | Planner rules on a synthetic Agile day |
+| `tools/fetch_stats.py` | Pull HA long-term statistics to CSV over the websocket (needs `HASS_URL`, `HASS_TOKEN`) |
+| `tools/fit_from_csv.py` | Fit the house model to such a CSV; the offline smoke test for the pipeline |
+| `apps.example.yaml` | Example AppDaemon config |
+| `docs/set_min_flow_temp.example.yaml` | Example bounded write script with read-back |
+
+Run the tests with `uv run tests/test_model.py` and `uv run tests/test_planner.py`.
+
+### What the synthetic test shows
+
+Two weeks of 5-minute data from a known 2R2C house with cheap-slot heating, 0.05 K
+measurement noise. The fitter recovers the envelope resistance within 4 %, the slab
+capacity within 6 % and the room-side solar gain within 4 %; the slab-side solar gain is
+poorly identified (−35 %), which is expected and why the code can fall back to a single
+gain term. COP fitted on a real aroTHERM plus hot-water run gives η = 0.33 with a 0.15
+COP residual across a 51 to 65 °C flow range.
+
+### A caution about cloud data
+
+Fitting to myVAILLANT cloud statistics does not work: the flow temperature was frozen in
+72 % of hourly buckets and energy counters arrive in weekly lumps. Use the bus (ebusd)
+readings; that is what the controller does.
 
 ## Requirements
 
