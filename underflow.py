@@ -21,6 +21,7 @@ import datetime as dt
 import appdaemon.plugins.hass.hassapi as hass
 
 from planner import PlannerConfig, plan, normalise_rates
+from narrative import describe, summary
 
 try:
     import numpy as np
@@ -40,6 +41,7 @@ class Underflow(hass.Hass):
         pc = self.args.get("planner", {}) or {}
         self.planner_cfg = PlannerConfig(**{k: v for k, v in pc.items() if k in PlannerConfig.__dataclass_fields__})
         self.plan_entity = self.args.get("plan_entity", self.status_entity + "_planned_min_flow")
+        self.narrative_entity = self.args.get("narrative_entity", self.status_entity + "_whats_going_on")
         self.write_script = self.args.get("write_script")  # e.g. script/set_179_min_flow_temp
         self._last_written = None
 
@@ -136,6 +138,14 @@ class Underflow(hass.Hass):
             },
         )
         self.log(f"plan: min flow {setpoint} ({result['reason']}); {result.get('cheap_slots')} cheap of {result.get('horizon_slots')} slots")
+        lines = describe(obs, result, now, cfg, self.dry_run)
+        self.set_state(
+            self.narrative_entity,
+            state=summary(lines),
+            attributes={"friendly_name": "underflow: what's going on", "icon": "mdi:text-long",
+                        "text": "\n".join(f"- {l}" for l in lines), "lines": lines,
+                        "updated": now.isoformat(timespec="seconds")},
+        )
         if self.dry_run or not self.write_script:
             return
         if self._last_written == setpoint and obs.get("min_flow_temp") == setpoint:

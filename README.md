@@ -67,6 +67,8 @@ work. They remain the comfort sensors.
 |---|---|
 | `underflow.py` | The AppDaemon app: observe every 30 min, run the planner, publish sensors, optionally call the write script |
 | `planner.py` | Stage 1 rules. Pure functions, no HA dependency |
+| `narrative.py` | Plain-English "what's going on" bullets from the observation and the plan, published as `sensor.underflow_whats_going_on` for a markdown card |
+| `tools/ha_dashboard.py` | Get/save a storage-mode dashboard over the websocket |
 | `model.py` | Stage 2 physics: `HouseModel`, `fit_house`, `KalmanFilter`, `CopModel`, `fit_cop`, `flow_target` |
 | `tests/test_model.py` | Synthetic recovery test: generates two weeks from known parameters, fits, checks recovery within a few %, checks a 24 h forecast, fits COP on a real hot-water run |
 | `tests/test_planner.py` | Planner rules on a synthetic Agile day |
@@ -75,7 +77,7 @@ work. They remain the comfort sensors.
 | `apps.example.yaml` | Example AppDaemon config |
 | `docs/set_min_flow_temp.example.yaml` | Example bounded write script with read-back |
 
-Run the tests with `uv run tests/test_model.py` and `uv run tests/test_planner.py`.
+Run the tests with `uv run tests/test_model.py`, `uv run tests/test_planner.py` and `uv run tests/test_narrative.py`.
 
 ### What the synthetic test shows
 
