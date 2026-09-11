@@ -1,0 +1,22 @@
+# Copy to /addon_configs/a0d7b954_appdaemon/apps/apps.yaml and fill in your entity ids.
+underflow:
+  module: underflow
+  class: Underflow
+  dry_run: true              # stage 0: observe and publish only, never write
+  interval_minutes: 30
+  status_entity: sensor.underflow
+  friendly_name: underflow heat pump controller
+  entities:
+    weather: weather.met_office_home          # any weather entity with a `temperature` attribute
+    outside_179: sensor.ebusd_outsidetemp      # the heat pump's own outside sensor (for comparison)
+    outside_177: sensor.other_outsidetemp      # optional second outside sensor; reuse the first if none
+    room_mean: sensor.room_temperature_mean    # e.g. a min_max helper over your room stats
+    flow_temp: sensor.ebusd_hc1flowtemp
+    return_temp: sensor.ebusd_returntemp
+    power_in: sensor.ebusd_hmu_currentconsumedpower   # kW electrical
+    power_out: sensor.ebusd_hmu_currentyieldpower     # kW heat
+    heat_curve: number.ebusd_hc1heatcurve
+    min_flow: number.ebusd_hc1minflowtempdesired      # the lever
+    max_flow: number.ebusd_hc1maxflowtempdesired
+    agile_rate: sensor.octopus_energy_electricity_xxx_current_rate
+    pump_status: sensor.ebusd_hmu_rundatastatuscode

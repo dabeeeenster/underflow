@@ -1,0 +1,32 @@
+# Home Assistant script: the ONLY write path underflow uses. Bounded, read back, loud on failure.
+# Adjust the entity ids and the /get topic for your ebusd instance and heating circuit.
+alias: Set heat pump minimum flow temperature (eBUS)
+mode: restart
+fields:
+  flow_temp:
+    name: Minimum flow temperature
+    required: true
+    selector:
+      number: {min: 20, max: 45, step: 1, mode: box, unit_of_measurement: "°C"}
+sequence:
+  - variables:
+      target: "{{ flow_temp | int }}"
+  - repeat:
+      count: 2
+      sequence:
+        - action: number.set_value
+          target: {entity_id: number.ebusd_hc1minflowtempdesired}
+          data: {value: "{{ target }}"}
+        - delay: {seconds: 15}
+        - action: mqtt.publish            # force ebusd to re-read; the /set path acknowledges nothing
+          data: {topic: ebusd/ctlv2/Hc1MinFlowTempDesired/get, payload: ""}
+        - delay: {seconds: 15}
+        - if:
+            - condition: template
+              value_template: "{{ (states('number.ebusd_hc1minflowtempdesired') | float(-1) - target) | abs < 0.5 }}"
+          then:
+            - stop: confirmed on the bus
+  - action: persistent_notification.create
+    data:
+      title: Heat pump min flow temp did NOT land
+      message: "Tried twice to set {{ target }}; controller reports {{ states('number.ebusd_hc1minflowtempdesired') }}."
