@@ -160,11 +160,21 @@ class CopModel:
         return np.minimum(self.eta * (t_flow + 273.15) / lift, self.cop_max)
 
 
-def fit_cop(p_in, p_out, t_flow, t_out, min_p_in=0.5) -> tuple[CopModel, dict]:
-    """Fit eta from measured electrical (kW) and heat (kW) power. Samples below min_p_in kW are ignored."""
+def fit_cop(p_in, p_out, t_flow, t_out, min_p_in=0.5, mode=None,
+            keep_modes=("heating",)) -> tuple[CopModel, dict]:
+    """Fit eta from measured electrical (kW) and heat (kW) power.
+
+    Samples below min_p_in kW are ignored. If per-sample `mode` labels are supplied
+    (see Underflow._mode) only `keep_modes` are fitted: a domestic hot water charge
+    runs the flow to 60-70 C against a 5 K lift, which is a different operating point
+    from 30 C space heating and drags eta well away from the value the planner needs.
+    """
     p_in = np.asarray(p_in, float); p_out = np.asarray(p_out, float)
     t_flow = np.asarray(t_flow, float); t_out = np.asarray(t_out, float)
     m = (p_in >= min_p_in) & (p_out > 0) & np.isfinite(t_flow) & np.isfinite(t_out)
+    if mode is not None:
+        keep = set(keep_modes)
+        m &= np.array([str(x) in keep for x in mode], dtype=bool)
     if m.sum() < 3:
         return CopModel(), {"n": int(m.sum()), "note": "too few running samples; default eta kept"}
     cop = p_out[m] / p_in[m]

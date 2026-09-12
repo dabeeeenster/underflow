@@ -44,6 +44,7 @@ class Underflow(hass.Hass):
         self.narrative_entity = self.args.get("narrative_entity", self.status_entity + "_whats_going_on")
         self.write_script = self.args.get("write_script")  # e.g. script/set_179_min_flow_temp
         self._last_written = None
+        self._unknown_codes = set()
 
         # First tick shortly after start, then on the half hour.
         now = self.datetime(aware=True)
@@ -65,6 +66,31 @@ class Underflow(hass.Hass):
         except (TypeError, ValueError):
             return None
 
+    def _mode(self, status):
+        """Classify the HMU run-data status code into idle / dhw / heating / cooling.
+
+        The codes look like 'standby', 'hwc_compressor_active', and (once the heating
+        season starts) an 'hc'/'heating' equivalent. This matters because a cylinder
+        charge runs the flow to 60-70 C, a completely different operating point from
+        30 C space heating: mixing the two fits the COP model to the wrong regime.
+        Unrecognised codes are logged once and never counted as heating.
+        """
+        s = (status or "").strip().lower()
+        if s in ("", "unknown", "unavailable"):
+            return "unknown"
+        if "standby" in s or s == "off":
+            return "idle"
+        if "hwc" in s or "dhw" in s or "water" in s:
+            return "dhw"
+        if "cool" in s:
+            return "cooling"
+        if "hc" in s or "heat" in s:
+            return "heating"
+        if s not in self._unknown_codes:
+            self._unknown_codes.add(s)
+            self.log(f"unrecognised HMU status code {status!r}; not counted as heating", level="WARNING")
+        return "other"
+
     # ---- main loop -----------------------------------------------------
     def tick(self, kwargs=None):
         e = self.entities
@@ -74,6 +100,7 @@ class Underflow(hass.Hass):
             "outside_temp_177_sensor": self._num(e["outside_177"]),
             "room_temp_mean": self._num(e["room_mean"]),
             "flow_temp": self._num(e["flow_temp"]),
+            "flow_temp_circuit": self._num(e["flow_temp_circuit"]) if e.get("flow_temp_circuit") else None,
             "return_temp": self._num(e["return_temp"]),
             "power_in_kw": self._num(e["power_in"]),
             "power_out_kw": self._num(e["power_out"]),
@@ -83,6 +110,7 @@ class Underflow(hass.Hass):
             "agile_rate_now": self._num(e["agile_rate"]),
             "pump_status": self.get_state(e["pump_status"]),
         }
+        obs["mode"] = self._mode(obs["pump_status"])
         pin, pout = obs["power_in_kw"], obs["power_out_kw"]
         obs["cop_now"] = round(pout / pin, 2) if pin and pout and pin > 0.2 else None
         obs["dry_run"] = self.dry_run
@@ -98,7 +126,7 @@ class Underflow(hass.Hass):
         self.log(
             f"{state}: out={obs['outside_temp_met_office']} room={obs['room_temp_mean']} "
             f"flow={obs['flow_temp']} minflow={obs['min_flow_temp']} "
-            f"P={pin}/{pout} kW cop={obs['cop_now']} agile={obs['agile_rate_now']}"
+            f"P={pin}/{pout} kW cop={obs['cop_now']} mode={obs['mode']} agile={obs['agile_rate_now']}"
         )
         self.run_planner(obs)
 

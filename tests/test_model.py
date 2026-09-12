@@ -50,4 +50,31 @@ cm, cinfo = fit_cop(p_in, p_out, t_flow, t_out)
 print("COP fit on 179 DHW run: eta %.3f, mean COP %.2f, rmse %.2f (n=%d)" % (cinfo["eta"], cinfo["cop_mean"], cinfo["cop_rmse"], cinfo["n"]))
 assert 0.25 < cm.eta < 0.45
 print("predicted heating COP at 32 °C flow / 5 °C outside: %.2f" % cm.cop(32, 5))
+
+# ...but that run is a cylinder charge, and eta fitted on it is not the space-heating
+# eta. With mode labels, DHW samples must be dropped and only heating samples fitted.
+mode_dhw = ["dhw"] * len(p_in)
+cm_none, info_none = fit_cop(p_in, p_out, t_flow, t_out, mode=mode_dhw)
+assert info_none["n"] == 0, info_none
+assert cm_none.eta == CopModel().eta, "all-DHW input must fall back to the default eta"
+
+# A synthetic space-heating run at 32 °C flow, eta = 0.42 by construction.
+t_flow_h = np.array([30.0, 31.0, 32.0, 33.0, 34.0, 32.0])
+t_out_h = np.full_like(t_flow_h, 5.0)
+carnot_h = (t_flow_h + 273.15) / np.maximum(t_flow_h - t_out_h, 3.0)
+p_in_h = np.full_like(t_flow_h, 1.5)
+p_out_h = 0.42 * carnot_h * p_in_h
+
+mixed_in = np.concatenate([p_in, p_in_h]); mixed_out = np.concatenate([p_out, p_out_h])
+mixed_flow = np.concatenate([t_flow, t_flow_h]); mixed_out_t = np.concatenate([t_out, t_out_h])
+mixed_mode = mode_dhw + ["heating"] * len(t_flow_h)
+
+cm_gated, info_gated = fit_cop(mixed_in, mixed_out, mixed_flow, mixed_out_t, mode=mixed_mode)
+assert info_gated["n"] == len(t_flow_h), info_gated
+assert abs(cm_gated.eta - 0.42) < 1e-6, cm_gated.eta
+
+cm_mixed, info_mixed = fit_cop(mixed_in, mixed_out, mixed_flow, mixed_out_t)
+print("eta: heating-only %.3f, DHW+heating unfiltered %.3f (n=%d)"
+      % (cm_gated.eta, cm_mixed.eta, info_mixed["n"]))
+assert abs(cm_mixed.eta - 0.42) > 0.02, "unfiltered fit should be visibly dragged by the DHW run"
 print("OK")

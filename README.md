@@ -94,6 +94,28 @@ Fitting to myVAILLANT cloud statistics does not work: the flow temperature was f
 72 % of hourly buckets and energy counters arrive in weekly lumps. Use the bus (ebusd)
 readings; that is what the controller does.
 
+## Picking the flow temperature sensor
+
+Get this one right or the COP fit is meaningless. On a Vaillant there are two candidate
+registers and they are not interchangeable:
+
+* `hmu FlowTemp` — the heat pump's own outlet sensor. **This is the one to use.** It is
+  what the Carnot expression means by `T_flow`, and it reads correctly whatever the
+  pump is doing.
+* `ctlv2 Hc1FlowTemp` — the *heating circuit* sensor. Whenever the circuit is idle it
+  measures stagnant water, so it drifts down from whatever the last run left in the
+  pipe over many hours. On the author's house it sat at 47.5 °C with the pump in
+  standby and a 19.5 °C return, and stayed flat at 30 °C right through a hot-water
+  charge that took the pump outlet to 70 °C.
+
+Keep the circuit sensor as a diagnostic (`flow_temp_circuit`) — it tells you what the
+floor loops actually see — but never feed it to the model.
+
+Equally, **do not fit the COP on hot-water cycles.** A cylinder charge runs 60–70 °C
+flow against a small lift; space heating runs ~30 °C. Mixing them fits `eta` to the
+wrong regime. `underflow.py` classifies the HMU status code into
+`idle`/`dhw`/`heating`/`cooling` and `fit_cop(..., mode=...)` keeps only `heating`.
+
 ## Requirements
 
 - Home Assistant OS with the **AppDaemon** add-on (Community Apps repository), configured
