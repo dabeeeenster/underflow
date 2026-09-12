@@ -67,10 +67,12 @@ work. They remain the comfort sensors.
 |---|---|
 | `underflow.py` | The AppDaemon app: observe every 30 min, run the planner, publish sensors, optionally call the write script |
 | `planner.py` | Stage 1 rules. Pure functions, no HA dependency |
+| `hasafe.py` | Sanitises values so AppDaemon's HTTP kwarg cleaning cannot drop zeros and `False` on the way to HA |
 | `narrative.py` | Plain-English "what's going on" bullets from the observation and the plan, published as `sensor.underflow_whats_going_on` for a markdown card |
 | `tools/ha_dashboard.py` | Get/save a storage-mode dashboard over the websocket |
 | `model.py` | Stage 2 physics: `HouseModel`, `fit_house`, `KalmanFilter`, `CopModel`, `fit_cop`, `flow_target` |
 | `tests/test_model.py` | Synthetic recovery test: generates two weeks from known parameters, fits, checks recovery within a few %, checks a 24 h forecast, fits COP on a real hot-water run |
+| `tests/test_ha_safe.py` | Reproduces AppDaemon's attribute pruning against a verbatim copy of its cleaner, then checks `ha_safe` defeats it |
 | `tests/test_planner.py` | Planner rules on a synthetic Agile day |
 | `tools/fetch_stats.py` | Pull HA long-term statistics to CSV over the websocket (needs `HASS_URL`, `HASS_TOKEN`) |
 | `tools/fit_from_csv.py` | Fit the house model to such a CSV; the offline smoke test for the pipeline |

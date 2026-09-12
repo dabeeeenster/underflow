@@ -22,6 +22,7 @@ import appdaemon.plugins.hass.hassapi as hass
 
 from planner import PlannerConfig, plan, normalise_rates
 from narrative import describe, summary
+from hasafe import ha_safe
 
 try:
     import numpy as np
@@ -65,6 +66,10 @@ class Underflow(hass.Hass):
             return None if v in (None, "unknown", "unavailable", "") else float(v)
         except (TypeError, ValueError):
             return None
+
+    def _publish(self, entity_id, state, attributes):
+        """set_state with every value run through ha_safe(). See its docstring."""
+        self.set_state(entity_id, state=ha_safe(state), attributes=ha_safe(attributes))
 
     def _mode(self, status):
         """Classify the HMU run-data status code into idle / dhw / heating / cooling.
@@ -118,10 +123,10 @@ class Underflow(hass.Hass):
         obs["last_run"] = self.datetime(aware=True).isoformat(timespec="seconds")
 
         state = "observing" if self.dry_run else "controlling"
-        self.set_state(
+        self._publish(
             self.status_entity,
-            state=state,
-            attributes={"friendly_name": self.args.get("friendly_name", "underflow heat pump controller"), "icon": "mdi:heat-pump", **obs},
+            state,
+            {"friendly_name": self.args.get("friendly_name", "underflow heat pump controller"), "icon": "mdi:heat-pump", **obs},
         )
         self.log(
             f"{state}: out={obs['outside_temp_met_office']} room={obs['room_temp_mean']} "
@@ -146,10 +151,10 @@ class Underflow(hass.Hass):
         now = self.datetime(aware=True)
         result = plan(self._rates(), now, obs.get("room_temp_mean"), cfg)
         setpoint = result["setpoint_now"]
-        self.set_state(
+        self._publish(
             self.plan_entity,
-            state=setpoint,
-            attributes={
+            setpoint,
+            {
                 "friendly_name": "underflow planned min flow temp",
                 "icon": "mdi:thermometer-water",
                 "unit_of_measurement": "\u00b0C",
@@ -167,10 +172,10 @@ class Underflow(hass.Hass):
         )
         self.log(f"plan: min flow {setpoint} ({result['reason']}); {result.get('cheap_slots')} cheap of {result.get('horizon_slots')} slots")
         lines = describe(obs, result, now, cfg, self.dry_run)
-        self.set_state(
+        self._publish(
             self.narrative_entity,
-            state=summary(lines),
-            attributes={"friendly_name": "underflow: what's going on", "icon": "mdi:text-long",
+            summary(lines),
+            {"friendly_name": "underflow: what's going on", "icon": "mdi:text-long",
                         "text": "\n".join(f"- {l}" for l in lines), "lines": lines,
                         "updated": now.isoformat(timespec="seconds")},
         )
