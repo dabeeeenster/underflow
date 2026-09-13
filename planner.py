@@ -48,7 +48,8 @@ def plan(rates: list[tuple[dt.datetime, float]], now: dt.datetime, room_temp: fl
     horizon_end = now + dt.timedelta(hours=cfg.horizon_hours)
     upcoming = [(s, p) for s, p in rates if s + dt.timedelta(minutes=30) > now and s < horizon_end]
     if not upcoming:
-        return {"setpoint_now": cfg.baseline, "reason": "no rates available", "slots": [], "threshold": None}
+        return {"setpoint_now": cfg.baseline, "reason": "no rates available", "slots": [],
+                "threshold": None, "urgent": False}
 
     # Exactly k cheapest slots (ties broken by time, earliest first) so a flat price
     # band cannot flood the plan with 'cheap' slots.
@@ -66,11 +67,18 @@ def plan(rates: list[tuple[dt.datetime, float]], now: dt.datetime, room_temp: fl
     current = next((sl for sl in slots if dt.datetime.fromisoformat(sl["start"]) <= now), slots[0])
     setpoint, reason = current["min_flow"], ("cheap slot" if current["cheap"] else "not a cheap slot")
 
+    # `urgent` marks a comfort override. The caller holds a new setpoint for a minimum
+    # dwell so the plan cannot chatter a register on a lossy link, but comfort must not
+    # wait out a dwell timer, so it is allowed to jump the queue.
+    urgent = False
     if room_temp is not None:
         if room_temp >= cfg.comfort_max and setpoint > cfg.baseline:
             setpoint, reason = cfg.baseline, f"room {room_temp:.1f} at/above comfort max {cfg.comfort_max}"
+            urgent = True
         elif room_temp <= cfg.comfort_min and setpoint < cfg.boost:
             setpoint, reason = cfg.boost, f"room {room_temp:.1f} at/below comfort min {cfg.comfort_min}"
+            urgent = True
 
     return {"setpoint_now": setpoint, "reason": reason, "slots": slots, "threshold": threshold,
+            "urgent": urgent,
             "cheap_slots": sum(1 for sl in slots if sl["cheap"]), "horizon_slots": len(slots)}
