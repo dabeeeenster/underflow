@@ -42,6 +42,7 @@ from hasafe import ha_safe
 from ebusd import Ebusd
 from reconcile import ReconcileConfig, RegisterState, decide
 from demand import Held, MirrorConfig, choose, hold
+from probe import ProbeState, ProbeTarget, summarise, update
 
 try:
     import numpy as np
@@ -90,6 +91,21 @@ class Underflow(hass.Hass):
                            if self.mirror_cfg.enabled and self.mirror_host else None)
         self.held = Held()
 
+        # --- liveness probes: is each device still answering on its bus?
+        # Not a controller concern, but this app is the only thing with an ebusd client
+        # and a 5-minute cycle, and the alternative (inferring death from how long an HA
+        # entity has been unchanged) false-alarms every time a pump sits in standby.
+        pb = self.args.get("probes", {}) or {}
+        self.probe_entity = pb.get("entity", "sensor.underflow_bus_probe")
+        self.probe_dead_after = int(pb.get("dead_after", 3))
+        self.probe_timeout = float(pb.get("timeout", 3.0))
+        self.probes = [ProbeTarget(**t) for t in (pb.get("targets") or [])]
+        self._probe_clients = {}
+        for t in self.probes:
+            self._probe_clients.setdefault((t.host, t.port),
+                                           Ebusd(t.host, t.port, self.probe_timeout))
+        self.probe_states = {t.name: ProbeState() for t in self.probes}
+
         self.desired = self._recover_desired()
         self.desired_since = self.datetime(aware=True) if self.desired is not None else None
         self.source, self.source_reason = "none", "starting up"
@@ -100,7 +116,8 @@ class Underflow(hass.Hass):
         self._schedule(self.on_reconcile, self.reconcile_interval)
         self.run_in(self.on_decide, 10)
         self.log(f"initialised; dry_run={self.dry_run}; decide/{self.interval}min "
-                 f"reconcile/{self.reconcile_interval}min; recovered desired={self.desired}; "
+                 f"reconcile/{self.reconcile_interval}min; probes={len(self.probes)}; "
+                 f"recovered desired={self.desired}; "
                  f"numeric stack: {NUMERIC_OK}")
 
     def terminate(self):
@@ -330,13 +347,37 @@ class Underflow(hass.Hass):
         self._publish_status(obs, extra)
 
         if decision.action != self._last_decision or decision.action == "write":
-            self.log(f"reconcile: {decision.action} — {decision.reason}")
+            self.log(f"reconcile: {decision.action} - {decision.reason}")
         self._last_decision = decision.action
+
+        self._run_probes(now)
 
         if decision.alert:
             self._alert(decision.alert)
         if decision.writes:
             self._write(self.desired)
+
+    # ---- liveness probes -----------------------------------------------
+    def _run_probes(self, now):
+        """Force one read per device and publish a debounced alive/dead verdict.
+
+        `read -f` goes to the wire, so a device either answers or it does not — unlike
+        an HA entity's staleness, which cannot tell a steady value from a silent one.
+        A single failure is a WiFi blip; `dead_after` consecutive ones is a device gone.
+        """
+        if not self.probes:
+            return
+        for t in self.probes:
+            reading = self._probe_clients[(t.host, t.port)].read_register(t.circuit, t.register)
+            was_dead = self.probe_states[t.name].dead(self.probe_dead_after)
+            self.probe_states[t.name] = update(self.probe_states[t.name], reading, now)
+            is_dead = self.probe_states[t.name].dead(self.probe_dead_after)
+            if is_dead != was_dead:
+                self.log(f"probe {t.name}: {'NOT ANSWERING' if is_dead else 'answering again'}"
+                         f" ({t.circuit} {t.register})", level="WARNING" if is_dead else "INFO")
+        state, attrs = summarise(self.probe_states, self.probe_dead_after, now)
+        self._publish(self.probe_entity, state,
+                      {"friendly_name": "underflow eBUS device probe", "icon": "mdi:lan-check", **attrs})
 
     def _write(self, value):
         if self.dry_run:

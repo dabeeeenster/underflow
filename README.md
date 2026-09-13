@@ -71,6 +71,7 @@ work. They remain the comfort sensors.
 | `ebusd.py` | Client for ebusd's TCP command port. `read -f` forces a real bus read, which is the only way to verify a setting — see below |
 | `reconcile.py` | The converging write loop: given a target, a fresh reading and the link state, decide whether to write. Pure |
 | `demand.py` | Where the target comes from: a mirrored neighbouring controller, or the local planner. Pure |
+| `probe.py` | Is each device still answering on the bus? Debounced alive/dead from forced reads, for alerting to trigger on. Pure |
 | `hasafe.py` | Sanitises values so AppDaemon's HTTP kwarg cleaning cannot drop zeros and `False` on the way to HA |
 | `narrative.py` | Plain-English "what's going on" bullets from the observation and the plan, published as `sensor.underflow_whats_going_on` for a markdown card |
 | `tools/ha_dashboard.py` | Get/save a storage-mode dashboard over the websocket |
@@ -81,6 +82,7 @@ work. They remain the comfort sensors.
 | `tests/test_ebusd.py` | Reply parsing, the `-f` flag, and that a dead bus returns a `Reading` rather than raising |
 | `tests/test_reconcile.py` | That an unreadable bus never causes a write, backoff throttles but never latches off, alerts fire on duration |
 | `tests/test_demand.py` | Mirror held across a dropout, abandoned when stale, caps and comfort band bind |
+| `tests/test_probe.py` | A steady value stays alive however long it holds; blips debounce; an absent device is found |
 | `tools/fetch_stats.py` | Pull HA long-term statistics to CSV over the websocket (needs `HASS_URL`, `HASS_TOKEN`) |
 | `tools/fit_from_csv.py` | Fit the house model to such a CSV; the offline smoke test for the pipeline |
 | `apps.example.yaml` | Example AppDaemon config |
@@ -141,6 +143,32 @@ the weight:
   picked up with nobody involved.
 - **Alert on duration, not on failure.** One failed write is a blip and is normal. Thirty
   minutes of sustained mismatch is a fault worth a human.
+
+### Telling "nothing happened" from "the device is gone"
+
+The same publish-on-change behaviour breaks device health monitoring, and in a way that
+is easy to ship and hard to notice. The obvious alert — *"these sensors have not updated
+in 45 minutes, the device must be off the bus"* — cannot work, because a heat pump in
+standby at a steady temperature produces no messages at all. Silence and death look
+identical.
+
+In this house that alert false-alarmed four times in three days. The clearest case:
+*"179 heat pump data has stopped, flow frozen 51 min"* — fired on a warm afternoon while
+the pump was in standby, the flow temperature had drifted up to 23.75 °C and stopped
+moving, and a forced read showed the HMU answering normally throughout.
+
+`probe.py` replaces the inference with a measurement: one forced read per device per
+cycle, debounced over `dead_after` consecutive failures so a WiFi blip is not a death.
+The result is published as one sensor whose per-device `alive_*` attributes alerting can
+trigger on directly. A device that has genuinely dropped out of ebusd's scan now fails
+the read immediately and is reported in three cycles, which is both more reliable *and*
+faster than the 45-minute staleness rule it replaced.
+
+Worth stating the trade explicitly: this moves the failure mode rather than removing it.
+If the controller stops running, the probe attributes freeze at their last value and the
+alerts go quiet. So whatever consumes them needs a watchdog on the probe sensor itself —
+and staleness *is* the right signal there, because the sensor is republished
+unconditionally every cycle.
 
 ### Why the loop runs at two speeds
 
