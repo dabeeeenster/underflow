@@ -71,7 +71,7 @@ work. They remain the comfort sensors.
 | `ebusd.py` | Client for ebusd's TCP command port. `read -f` forces a real bus read, which is the only way to verify a setting — see below |
 | `reconcile.py` | The converging write loop: given a target, a fresh reading and the link state, decide whether to write. Pure |
 | `demand.py` | Where the target comes from: a mirrored neighbouring controller, or the local planner. Pure |
-| `probe.py` | Is each device still answering on the bus? Debounced alive/dead from forced reads, for alerting to trigger on. Pure |
+| `probe.py` | Is each device still answering on the bus? Debounced alive/dead from ebusd's `lastup`, costing no bus traffic. Pure |
 | `hasafe.py` | Sanitises values so AppDaemon's HTTP kwarg cleaning cannot drop zeros and `False` on the way to HA |
 | `narrative.py` | Plain-English "what's going on" bullets from the observation and the plan, published as `sensor.underflow_whats_going_on` for a markdown card |
 | `tools/ha_dashboard.py` | Get/save a storage-mode dashboard over the websocket |
@@ -157,12 +157,34 @@ In this house that alert false-alarmed four times in three days. The clearest ca
 the pump was in standby, the flow temperature had drifted up to 23.75 °C and stopped
 moving, and a forced read showed the HMU answering normally throughout.
 
-`probe.py` replaces the inference with a measurement: one forced read per device per
-cycle, debounced over `dead_after` consecutive failures so a WiFi blip is not a death.
-The result is published as one sensor whose per-device `alive_*` attributes alerting can
-trigger on directly. A device that has genuinely dropped out of ebusd's scan now fails
-the read immediately and is reported in three cycles, which is both more reliable *and*
-faster than the 45-minute staleness rule it replaced.
+`probe.py` replaces the inference with a measurement, and does it without putting
+anything on the bus. `find -V` asks ebusd what it holds *and* when it last had that value
+off the wire (`lastup`). Point it at a register ebusd already polls — `hmu Status01`
+refreshes about every 10 s — and the age of `lastup` is the liveness signal, free and
+for ever. A device that drops off stops advancing it: when the 177 adapter fell off WiFi
+at 08:37 on 14 Sep its `lastup` froze at 08:30:07 and was still frozen 28 minutes later,
+while 179's stayed 3 minutes old.
+
+Costs, measured on a healthy bus:
+
+| | |
+|---|---|
+| `read -f` (force a bus transaction) | 210–390 ms, occasionally 2 s |
+| `read -m 600` (accept ebusd's cache) | 2.5 ms |
+| `find -V` (ask ebusd what it knows) | **0 bus transactions** |
+
+That gap matters far more than traffic share suggests. These adapters tunnel a
+*real-time* protocol over 2.4 GHz WiFi — ebusd runs `--latency=100` for exactly that
+reason — and eBUS arbitration is timing-sensitive, so on a marginal link the right amount
+of extra traffic to add for monitoring is none at all. The result is debounced over
+`dead_after` consecutive failures so a blip is not a death, staggered rather than fired
+back to back, and backed off once a device is already known down.
+
+One hazard worth knowing: `lastup` is stamped in ebusd's own local time with no zone, so
+a clock running ahead makes every age negative and every device look permanently fresh.
+Seconds of skew are routine and ignored; beyond `MAX_CLOCK_SKEW` the probe refuses to
+judge freshness and reports a fault, because silence is the one failure mode a monitor
+must never have.
 
 Worth stating the trade explicitly: this moves the failure mode rather than removing it.
 If the controller stops running, the probe attributes freeze at their last value and the

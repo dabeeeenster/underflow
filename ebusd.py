@@ -9,9 +9,20 @@ move it. That entity reads `20` just as confidently when the adapter has been of
 for eighteen minutes as when the bus is healthy, and nothing on the entity distinguishes
 the two.
 
-`read -f` on the command port does distinguish them. The `-f` forces a fresh read from
-the bus instead of serving ebusd's cache, so the reply is either a value that was on the
-wire moments ago or an `ERR:`. One call is both the reading and the liveness probe.
+`read` on the command port does distinguish them, because ebusd knows when it last
+actually had the value off the wire. `read -m SECONDS` returns its cached value only if
+it is younger than that, and otherwise goes to the bus; `read -f` is the same thing with
+a zero age. Either way the reply is a value of known maximum age or an `ERR:` — never the
+indefinitely-old cache an HA entity gives you.
+
+**Prefer `-m` over `-f`.** ebusd already polls these registers, so a cache-tolerant read
+is almost always free, and forcing one is not: measured on a healthy bus, `-f` costs
+210–390 ms (occasionally 2 s) because it is a real eBUS transaction, against 2.5 ms for
+`-m 600`. Over a WiFi-tunnelled `ens:` adapter that transaction is also *timing*-sensitive
+— eBUS arbitration is real-time, which is why ebusd runs `--latency=100` here — so extra
+forced reads on a marginal link are far more costly than their share of traffic suggests.
+Force only when the answer has to be from the wire right now: verifying a write. A
+liveness check does not need that, because a stale cache is itself the evidence.
 
 Ports (both instances live on the Home Assistant box; `--httpport=8889` is internal to
 each container and not host-mapped, so the command port is the way in):
@@ -25,22 +36,50 @@ forced read-back, so the limits stay somewhere the user can see them.
 from __future__ import annotations
 
 import datetime as dt
+import re
 import socket
 from dataclasses import dataclass
 
 TERMINATOR = "\n\n"
+# How far ebusd's clock may run ahead of ours before a `lastup` age is untrustworthy.
+# Skew of seconds is routine; beyond this we refuse to judge freshness at all rather
+# than mistake a wrong clock for a healthy device.
+MAX_CLOCK_SKEW = 120.0
+LASTUP = re.compile(r"lastup=(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 
 
 @dataclass(frozen=True)
 class Reading:
-    """One attempt to read one register. `ok` means the bus answered with a number."""
+    """One attempt to get one register. `ok` means we have a number.
+
+    `lastup` is ebusd's own record of when it last had this value off the wire, when the
+    query supplied one (`find -V` does; `read` does not). It is the provenance that makes
+    a cached value safe to act on, and its age is a zero-cost liveness signal.
+    """
     value: float | None
     error: str | None
     at: dt.datetime
+    lastup: dt.datetime | None = None
 
     @property
     def ok(self) -> bool:
         return self.value is not None and self.error is None
+
+    def age(self, now: dt.datetime) -> float | None:
+        """Seconds since ebusd last had this off the wire, or None if unknown.
+
+        **Can be negative.** ebusd stamps `lastup` in its own container's local time with
+        no zone, so this is only as good as the two clocks agreeing. A few seconds of skew
+        is normal and harmless; a large negative age means ebusd's clock is ahead, and the
+        result must NOT be read as "very fresh" — that would make a dead device look alive
+        for ever. Callers guard with `MAX_CLOCK_SKEW`; the raw signed value is returned
+        here deliberately, so that a persistent skew stays visible instead of being
+        silently clamped away.
+        """
+        if self.lastup is None:
+            return None
+        lastup = self.lastup if self.lastup.tzinfo else self.lastup.replace(tzinfo=now.tzinfo)
+        return (now - lastup).total_seconds()
 
 
 def parse_read(raw: str) -> tuple[float | None, str | None]:
@@ -63,6 +102,36 @@ def parse_read(raw: str) -> tuple[float | None, str | None]:
         return float(field), None
     except ValueError:
         return None, f"unparseable response {first!r}"
+
+
+def parse_find(raw: str) -> tuple[float | None, dt.datetime | None, str | None]:
+    """Parse one `find -V` reply into (value, lastup, error).
+
+    The shape is  `<circuit> <name> = value=20.5 °C [Label] [ZZ=15, lastup=..., active read]`
+    with the fields before the first bracket and the metadata after. Messages with named
+    fields (`error=-;error_1=-;...`) have no single number, which is fine: `lastup` alone
+    is what liveness needs, so a missing value is not an error here.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None, None, "empty response"
+    first = text.splitlines()[0].strip()
+    if first.upper().startswith("ERR"):
+        return None, None, first
+    m = LASTUP.search(first)
+    lastup = dt.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S") if m else None
+    body = first.split("[", 1)[0]
+    body = body.split(" = ", 1)[1] if " = " in body else body
+    field = body.split(";")[0].strip()
+    if "=" in field:
+        field = field.rsplit("=", 1)[1].strip()
+    try:
+        value = float(field.split()[0]) if field else None
+    except (ValueError, IndexError):
+        value = None
+    if lastup is None and value is None:
+        return None, None, f"no value or lastup in {first!r}"
+    return value, lastup, None
 
 
 class Ebusd:
@@ -99,13 +168,40 @@ class Ebusd:
             except OSError:
                 pass
 
-    def read_register(self, circuit: str, name: str, force: bool = True) -> Reading:
-        """Force a fresh bus read of one register. Never raises: a dead bus is a Reading
-        with an error, which is a normal, expected outcome several times an hour."""
-        cmd = f"read {'-f ' if force else ''}-c {circuit} {name}"
+    def read_register(self, circuit: str, name: str, max_age: float | None = None) -> Reading:
+        """Read one register, accepting a cached value up to `max_age` seconds old.
+
+        `max_age=0` forces a real bus transaction (ebusd's `-f`); `None` leaves ebusd to
+        its own default. Prefer a non-zero age — see the module docstring for why forcing
+        is expensive on these adapters. Never raises: a dead bus is a Reading with an
+        error, which is a normal, expected outcome several times an hour.
+        """
+        if max_age is None:
+            age = ""
+        elif max_age <= 0:
+            age = "-f "
+        else:
+            age = f"-m {int(max_age)} "
+        cmd = f"read {age}-c {circuit} {name}"
         try:
             raw = self.command(cmd)
         except (OSError, socket.timeout) as exc:
             return Reading(None, f"{type(exc).__name__}: {exc}", self._clock())
         value, error = parse_read(raw)
         return Reading(value, error, self._clock())
+
+    def find_register(self, circuit: str, name: str) -> Reading:
+        """Ask ebusd what it holds and when it last had it off the wire.
+
+        **This puts nothing on the bus.** It queries ebusd's own state, so it is free to
+        call as often as you like — which is the whole point on an adapter that tunnels a
+        real-time protocol over a marginal 2.4 GHz link. The returned `lastup` is the
+        authoritative answer to "is this device still being read successfully", because
+        ebusd only advances it on a successful read from the wire.
+        """
+        try:
+            raw = self.command(f"find -V -c {circuit} {name}")
+        except (OSError, socket.timeout) as exc:
+            return Reading(None, f"{type(exc).__name__}: {exc}", self._clock())
+        value, lastup, error = parse_find(raw)
+        return Reading(value, error, self._clock(), lastup)

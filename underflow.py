@@ -15,13 +15,17 @@ moves, and because every change of mind costs a bus write on a lossy link; a dea
 and a minimum dwell keep normal operation to about two writes an hour. Applying runs six
 times as often because a *lost* write is the thing that actually costs heat: at a 30 min
 reconcile a dropped boost sits wrong for an entire Agile slot, at 5 min for a sixth of
-one. Reads are free, local and take milliseconds, so there is no reason to be stingy
-with them.
+one. Reads are cheap *when they come from ebusd's cache* — 2.5 ms against 210-390 ms for
+a forced bus transaction — which is why nothing here forces one except the read that
+confirms a write.
 
 **Verification does not go through Home Assistant.** ebusd publishes to MQTT only on
 change, so HA's `number.*` state is a cache with no expiry and reads the same whether
-the bus is healthy or the adapter has been dead for a quarter of an hour. `ebusd.py`
-forces a real bus read instead; see its docstring for the measurements.
+the bus is healthy or the adapter has been dead for a quarter of an hour. `ebusd.py` asks
+ebusd instead, which knows the true age of what it holds: `read -m SECONDS` answers from
+cache only if it is young enough and otherwise goes to the wire. That distinction is the
+whole point — and it is why liveness checking never needs to force, since a stale cache
+is itself the evidence. See `ebusd.py` for the measurements.
 
 Writes still go out through a bounded HA script with its own read-back, so the limits
 live somewhere the user can see them. This module never writes a register directly.
@@ -33,13 +37,14 @@ minimum flow temperature per half-hour against tariff and weather forecast.
 All entity ids come from apps.yaml; nothing is hard-coded to a particular house.
 """
 import datetime as dt
+import time
 
 import appdaemon.plugins.hass.hassapi as hass
 
 from planner import PlannerConfig, plan, normalise_rates
 from narrative import describe, summary
 from hasafe import ha_safe
-from ebusd import Ebusd
+from ebusd import MAX_CLOCK_SKEW, Ebusd
 from reconcile import ReconcileConfig, RegisterState, decide
 from demand import Held, MirrorConfig, choose, hold
 from probe import ProbeState, ProbeTarget, summarise, update
@@ -75,6 +80,10 @@ class Underflow(hass.Hass):
         self.circuit = eb.get("circuit", "ctlv2")
         self.register = eb.get("register", "Hc1MinFlowTempDesired")
         self.bus = Ebusd(eb["host"], eb["port"], float(eb.get("timeout", 4.0))) if eb.get("host") else None
+        # Routine verification accepts a cached value of known age; only the read that
+        # confirms a write we just made has to come off the wire. See ebusd.py.
+        self.bus_max_age = float(eb.get("max_age", 600.0))
+        self._force_next_read = False
         self.signal_entity = eb.get("signal_entity")
         rc = self.args.get("reconcile", {}) or {}
         self.reconcile_cfg = ReconcileConfig(**{k: v for k, v in rc.items() if k in ReconcileConfig.__dataclass_fields__})
@@ -99,6 +108,15 @@ class Underflow(hass.Hass):
         self.probe_entity = pb.get("entity", "sensor.underflow_bus_probe")
         self.probe_dead_after = int(pb.get("dead_after", 3))
         self.probe_timeout = float(pb.get("timeout", 3.0))
+        # Liveness is read from ebusd's own `lastup`, which puts NOTHING on the bus.
+        # A device counts as answering while ebusd has had its value off the wire within
+        # stale_after; the targets are registers ebusd polls every ~10-15 s by itself.
+        self.probe_stale_after = float(pb.get("stale_after", 300.0))
+        self.probe_stagger = float(pb.get("stagger_seconds", 3.0))
+        # Once a device is known down, stop probing it every cycle. A failing link is the
+        # last thing to add traffic to, and recovery within a few cycles is soon enough.
+        self.probe_down_every = int(pb.get("down_every_cycles", 3))
+        self._probe_cycle = 0
         self.probes = [ProbeTarget(**t) for t in (pb.get("targets") or [])]
         self._probe_clients = {}
         for t in self.probes:
@@ -321,10 +339,11 @@ class Underflow(hass.Hass):
         # one, so a failure here must leave the last-good value standing, not clear it.
         mirror_reading = None
         if self.mirror_bus is not None:
-            mirror_reading = self.mirror_bus.read_register(self.mirror_circuit, self.mirror_register)
+            mirror_reading = self.mirror_bus.read_register(
+                self.mirror_circuit, self.mirror_register, max_age=self.bus_max_age)
             self.held = hold(self.held, mirror_reading, now)
 
-        reading = self.bus.read_register(self.circuit, self.register) if self.bus else None
+        reading = self._read_own_register(now)
         signal_on, stable_for = self._signal()
         decision, self.reg_state = decide(self.desired, reading, signal_on, stable_for,
                                           self.reg_state, now, self.reconcile_cfg)
@@ -336,6 +355,7 @@ class Underflow(hass.Hass):
             "bus_value": reading.value if reading else None,
             "bus_error": reading.error if reading else None,
             "bus_fresh": bool(reading and reading.ok),
+            "bus_value_age_s": (round(reading.age(now)) if reading and reading.age(now) is not None else None),
             "bus_signal": signal_on,
             "bus_signal_stable_s": None if stable_for == float("inf") else round(stable_for),
             "mirror_value": self.held.value,
@@ -357,6 +377,23 @@ class Underflow(hass.Hass):
         if decision.writes:
             self._write(self.desired)
 
+    def _read_own_register(self, now):
+        """Get the register we control, preferring ebusd's cache when its provenance is
+        good enough. `find -V` costs nothing on the bus and returns the value *with* the
+        time ebusd last had it off the wire, so we only pay for a real transaction when
+        that is too old to act on — or when we have just written and need the wire."""
+        if self.bus is None:
+            return None
+        if not self._force_next_read:
+            found = self.bus.find_register(self.circuit, self.register)
+            age = found.age(now)
+            # -MAX_CLOCK_SKEW guards the same hazard as the probe: a clock running ahead
+            # would make any stale value look new. Fall through to a real read instead.
+            if found.ok and age is not None and -MAX_CLOCK_SKEW <= age <= self.bus_max_age:
+                return found
+        self._force_next_read = False
+        return self.bus.read_register(self.circuit, self.register, max_age=0)
+
     # ---- liveness probes -----------------------------------------------
     def _run_probes(self, now):
         """Force one read per device and publish a debounced alive/dead verdict.
@@ -367,15 +404,22 @@ class Underflow(hass.Hass):
         """
         if not self.probes:
             return
-        for t in self.probes:
-            reading = self._probe_clients[(t.host, t.port)].read_register(t.circuit, t.register)
+        self._probe_cycle += 1
+        for i, t in enumerate(self.probes):
             was_dead = self.probe_states[t.name].dead(self.probe_dead_after)
-            self.probe_states[t.name] = update(self.probe_states[t.name], reading, now)
+            if was_dead and self._probe_cycle % self.probe_down_every:
+                continue          # already down: don't hammer a failing link every cycle
+            if i and self.probe_stagger:
+                time.sleep(self.probe_stagger)   # spread the reads across the cycle
+            reading = self._probe_clients[(t.host, t.port)].find_register(t.circuit, t.register)
+            self.probe_states[t.name] = update(
+                self.probe_states[t.name], reading, now, self.probe_stale_after)
             is_dead = self.probe_states[t.name].dead(self.probe_dead_after)
             if is_dead != was_dead:
                 self.log(f"probe {t.name}: {'NOT ANSWERING' if is_dead else 'answering again'}"
                          f" ({t.circuit} {t.register})", level="WARNING" if is_dead else "INFO")
         state, attrs = summarise(self.probe_states, self.probe_dead_after, now)
+        attrs["stale_after_seconds"] = self.probe_stale_after
         self._publish(self.probe_entity, state,
                       {"friendly_name": "underflow eBUS device probe", "icon": "mdi:lan-check", **attrs})
 
@@ -390,6 +434,8 @@ class Underflow(hass.Hass):
         # quiet=True: the script's own two-try alert would fire on every WiFi blip, and
         # this loop is the thing that retries. Sustained failure is alerted from here.
         self.call_service(self.write_script, flow_temp=value, quiet=True)
+        # The next reconcile must see the wire, not a cache that predates the write.
+        self._force_next_read = True
 
     def _alert(self, message):
         self.log(f"ALERT: {message}", level="WARNING")
