@@ -15,6 +15,13 @@ underflow:
     horizon_hours: 24
     comfort_min: 20.5   # room mean below this -> boost regardless of price
     comfort_max: 22.5   # room mean above this -> baseline regardless of price
+  # Optional shadow, never written: steer by a room sensor shared with a neighbouring
+  # controller (e.g. the one Havenwise reads), with room_mean as limits both ways.
+  # shared:
+  #   sensor: sensor.shared_room_temperature
+  #   target: 21.5      # in that sensor's own terms
+  #   gain: 2.0         # °C of flow per K of error, per decide tick
+  #   step: 1.0         # cap per tick
   entities:
     weather: weather.met_office_home          # any weather entity with a `temperature` attribute
     outside_179: sensor.ebusd_outsidetemp      # the heat pump's own outside sensor (for comparison)
@@ -31,3 +38,4 @@ underflow:
     agile_rates_today: event.octopus_energy_electricity_xxx_current_day_rates      # `rates` attribute
     agile_rates_tomorrow: event.octopus_energy_electricity_xxx_next_day_rates
     pump_status: sensor.ebusd_hmu_rundatastatuscode
+    # mirror_177: sensor.neighbour_minflowtempdesired   # optional: publishes the copy-the-neighbour shadow

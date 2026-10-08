@@ -58,6 +58,7 @@ work. They remain the comfort sensors.
 |---|---|---|
 | 0 | Observe: publish all model inputs as `sensor.underflow`, write nothing | **live, Sep 2026** |
 | 1 | Rule-based Agile shifting (`planner.py`): boost min flow in the cheapest third of upcoming slots, baseline otherwise, comfort band overrides | **built and running in dry run**; publishes `sensor.underflow_planned_min_flow`. Goes live Oct 2026 |
+| 1s | Shadows: alongside the real target, compute what two alternatives would ask for and publish each as its own sensor, never written. **Copy 177** (`sensor.underflow_shadow_mirror`) copies the neighbouring controller's min flow; **aim at the shared sensor** (`shared.py`, `sensor.underflow_shadow_shared`) steers by the room sensor the neighbouring controller uses, with this half's own rooms as limits both ways | **added Oct 2026**, for a week's comparison before choosing a demand source |
 | 1b | Tolerant writes (`reconcile.py`, `ebusd.py`): hold a target, verify it against the bus every 5 min, write only on drift | **built, running in dry run Sep 2026** |
 | 2 | House + COP models (`model.py`): 2R2C fit, Kalman filter, Carnot-fraction COP | **built and tested on synthetic data**; real fit needs a month of heating data (Nov 2026) |
 | 3 | Optimise min flow per half-hour (dynamic programme over slab temperature) | Dec 2026 |
@@ -71,6 +72,7 @@ work. They remain the comfort sensors.
 | `ebusd.py` | Client for ebusd's TCP command port. `read -f` forces a real bus read, which is the only way to verify a setting — see below |
 | `reconcile.py` | The converging write loop: given a target, a fresh reading and the link state, decide whether to write. Pure |
 | `demand.py` | Where the target comes from: a mirrored neighbouring controller, or the local planner. Pure |
+| `shared.py` | Shadow demand source: steer by the neighbour's room sensor with a slow, step-capped integrator; this half's room mean caps it above and floors it below. Pure |
 | `probe.py` | Is each device still answering on the bus? Debounced alive/dead from ebusd's `lastup`, costing no bus traffic. Pure |
 | `hasafe.py` | Sanitises values so AppDaemon's HTTP kwarg cleaning cannot drop zeros and `False` on the way to HA |
 | `narrative.py` | Plain-English "what's going on" bullets from the observation and the plan, published as `sensor.underflow_whats_going_on` for a markdown card |
@@ -82,6 +84,7 @@ work. They remain the comfort sensors.
 | `tests/test_ebusd.py` | Reply parsing, the `-f` flag, and that a dead bus returns a `Reading` rather than raising |
 | `tests/test_reconcile.py` | That an unreadable bus never causes a write, backoff throttles but never latches off, alerts fire on duration |
 | `tests/test_demand.py` | Mirror held across a dropout, abandoned when stale, caps and comfort band bind |
+| `tests/test_shared.py` | Deadband, one step per tick, floor and screed cap, and that this half's own rooms beat the shared sensor in both directions |
 | `tests/test_probe.py` | A steady value stays alive however long it holds; blips debounce; an absent device is found |
 | `tools/fetch_stats.py` | Pull HA long-term statistics to CSV over the websocket (needs `HASS_URL`, `HASS_TOKEN`) |
 | `tools/fit_from_csv.py` | Fit the house model to such a CSV; the offline smoke test for the pipeline |

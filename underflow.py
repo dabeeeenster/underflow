@@ -36,6 +36,7 @@ minimum flow temperature per half-hour against tariff and weather forecast.
 
 All entity ids come from apps.yaml; nothing is hard-coded to a particular house.
 """
+import dataclasses
 import datetime as dt
 import time
 
@@ -47,6 +48,7 @@ from hasafe import ha_safe
 from ebusd import MAX_CLOCK_SKEW, Ebusd
 from reconcile import ReconcileConfig, RegisterState, decide
 from demand import Held, MirrorConfig, choose, hold
+from shared import SharedConfig, shared_step
 from probe import ProbeState, ProbeTarget, summarise, update
 
 try:
@@ -99,6 +101,19 @@ class Underflow(hass.Hass):
         self.mirror_bus = (Ebusd(self.mirror_host, self.mirror_port, float(eb.get("timeout", 4.0)))
                            if self.mirror_cfg.enabled and self.mirror_host else None)
         self.held = Held()
+
+        # --- shadows: alternative demand sources computed every decide tick and
+        # published as their own sensors, never written. A season-long record of what
+        # each would have done, to compare against what 179 actually did.
+        sc = dict(self.args.get("shared", {}) or {})
+        self.shared_sensor = sc.pop("sensor", None)
+        self.shared_entity = sc.pop("entity", self.status_entity + "_shadow_shared")
+        self.shared_cfg = SharedConfig(**{k: v for k, v in sc.items() if k in SharedConfig.__dataclass_fields__})
+        self.shared_value = self._recover(self.shared_entity) if self.shared_sensor else None
+        # The mirror shadow reads 177's register from HA's ebusd cache rather than the
+        # bus: a shadow is not worth a transaction on 177's poor link.
+        self.mirror_shadow_source = self.entities.get("mirror_177")
+        self.mirror_shadow_entity = self.status_entity + "_shadow_mirror"
 
         # --- liveness probes: is each device still answering on its bus?
         # Not a controller concern, but this app is the only thing with an ebusd client
@@ -154,8 +169,11 @@ class Underflow(hass.Hass):
     def _recover_desired(self):
         """An AppDaemon restart must not forget the target and rewrite blind. The plan
         sensor already holds it, so read it back."""
+        return self._recover(self.plan_entity)
+
+    def _recover(self, entity_id):
         try:
-            v = self.get_state(self.plan_entity)
+            v = self.get_state(entity_id)
             return None if v in (None, "unknown", "unavailable", "") else float(v)
         except (TypeError, ValueError):
             return None
@@ -280,6 +298,7 @@ class Underflow(hass.Hass):
             self.desired, self.desired_since = proposed, now
 
         self._publish_plan(result, obs, now)
+        self._publish_shadows(result, obs, now)
         self._reconcile(obs, now)
 
     def _rates(self):
@@ -329,6 +348,33 @@ class Underflow(hass.Hass):
              "text": "\n".join(f"- {l}" for l in lines), "lines": lines,
              "updated": now.isoformat(timespec="seconds")},
         )
+
+    def _publish_shadows(self, result, obs, now):
+        """Compute and publish what the alternative demand sources would ask for.
+        Nothing here touches `self.desired` or the bus."""
+        room = obs.get("room_temp_mean")
+        common = {"icon": "mdi:thermometer-water", "unit_of_measurement": "°C",
+                  "device_class": "temperature", "state_class": "measurement",
+                  "shadow": True, "room_temp_179": room, "actual_desired": self.desired,
+                  "updated": now.isoformat(timespec="seconds")}
+
+        if self.shared_sensor:
+            sensor = self._num(self.shared_sensor)
+            self.shared_value, why = shared_step(self.shared_value, sensor, room,
+                                                 self.shared_cfg, self.planner_cfg)
+            self._publish(self.shared_entity, self.shared_value, {
+                **common, "friendly_name": "underflow shadow: aim at shared sensor",
+                "reason": why, "shared_sensor": self.shared_sensor,
+                "shared_sensor_temp": sensor, "target": self.shared_cfg.target})
+
+        if self.mirror_shadow_source:
+            v177 = self._num(self.mirror_shadow_source)
+            held = Held(v177, now) if v177 is not None else Held()
+            value, _, why = choose(held, result["setpoint_now"], room, self.planner_cfg,
+                                   dataclasses.replace(self.mirror_cfg, enabled=True), now)
+            self._publish(self.mirror_shadow_entity, value, {
+                **common, "friendly_name": "underflow shadow: copy 177",
+                "reason": why, "value_177": v177})
 
     # ---- reconcile: make the register match ----------------------------
     def on_reconcile(self, kwargs=None):
