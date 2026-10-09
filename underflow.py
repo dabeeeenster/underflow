@@ -88,7 +88,8 @@ class Underflow(hass.Hass):
         self._force_next_read = False
         self.signal_entity = eb.get("signal_entity")
         rc = self.args.get("reconcile", {}) or {}
-        self.reconcile_cfg = ReconcileConfig(**{k: v for k, v in rc.items() if k in ReconcileConfig.__dataclass_fields__})
+        self.reconcile_cfg = ReconcileConfig(**{k: v for k, v in rc.items() if k in ReconcileConfig.__dataclass_fields__},
+                                             dry_run=self.dry_run)
         self.reg_state = RegisterState()
 
         # --- the demand source (177's Havenwise decisions, once they exist)

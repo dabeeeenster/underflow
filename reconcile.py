@@ -38,6 +38,9 @@ class ReconcileConfig:
     # Seconds to wait before the nth retry, indexed by attempts already made; the last
     # entry repeats forever. With a 5 min cycle: write, +5 min, +5 min, +15, +30, +30...
     backoff_seconds: tuple[float, ...] = (0.0, 0.0, 0.0, 900.0, 1800.0)
+    # In dry run nothing is written, so a mismatch is expected and never alerts. A bus
+    # that stops answering still does.
+    dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -122,7 +125,7 @@ def decide(
     nxt = dataclasses.replace(nxt, mismatch_since=since)
     stale = _age(since, now)
     alert = None
-    if stale >= cfg.alert_after_seconds and not state.alerted:
+    if stale >= cfg.alert_after_seconds and not state.alerted and not cfg.dry_run:
         alert = (f"{desired:g} has not stuck for {stale / 60:.0f} min — the bus still "
                  f"reports {reading.value:g} after {state.attempts} attempts")
         nxt = dataclasses.replace(nxt, alerted=True)

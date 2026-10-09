@@ -98,4 +98,20 @@ for i in range(5):
 d, st = decide(32.0, ok(32.0), state=st, now=t, cfg=cfg, **UP)
 assert not alerted and d.action == "confirmed" and st.attempts == 0
 
+# Dry run writes nothing, so the target never sticks; that must not alert (it did at
+# 04:00 on 9 Oct 2026, when the planner first boosted in dry run). A dead bus still does.
+dry = ReconcileConfig(dry_run=True)
+st, t, alerted = RegisterState(), T0, False
+for i in range(24):
+    d, st = decide(32.0, ok(20.0), state=st, now=t, cfg=dry, **UP)
+    alerted |= bool(d.alert)
+    t += dt.timedelta(minutes=5)
+assert not alerted, "a dry-run mismatch must never alert"
+st, t, alerted = RegisterState(), T0, False
+for i in range(12):
+    d, st = decide(32.0, err(), state=st, now=t, cfg=dry, **UP)
+    alerted |= bool(d.alert)
+    t += dt.timedelta(minutes=5)
+assert alerted, "an unreadable bus must still alert in dry run"
+
 print(f"reconcile OK: dead bus never writes; {writes} writes in 4 h of failure; alert at 30 min")
