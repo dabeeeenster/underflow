@@ -63,7 +63,7 @@ except Exception as exc:  # pragma: no cover
 
 # Bump on every release (see README, "Releases") and add a CHANGELOG.md entry. Published
 # on the status sensor so the dashboard shows which build is actually running.
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 
 class Underflow(hass.Hass):
@@ -165,6 +165,19 @@ class Underflow(hass.Hass):
         self.log_dir = lc.get("dir")
         self.log_prefix = lc.get("prefix", "underflow")
         self.log_columns = dict(lc.get("columns", {}) or {})
+        # Time-weighted means between rows (e.g. PV), fed by state changes.
+        self.log_averaged = dict(lc.get("averaged", {}) or {})
+        self._averages = {}
+        for name, ent in self.log_averaged.items():
+            avg = datalog.TimeAverage()
+            avg.update(self.get_state(ent), self.datetime(aware=True))
+            self._averages[name] = avg
+            self.listen_state(self._on_averaged, ent, name=name)
+        # Registers read straight off the bus for each row ("circuit Register"). ebusd
+        # polls the HMU power and flow registers only every ~10 min, so HA's entities
+        # for them are stale between polls; `read -m 60` costs at most one transaction.
+        self.log_bus = dict(lc.get("bus", {}) or {})
+        self._last_log = None
 
         self.desired = self._recover_desired()
         self.desired_since = self.datetime(aware=True) if self.desired is not None else None
@@ -470,9 +483,18 @@ class Underflow(hass.Hass):
                           variables={"mode": self.zone_desired})
         return current, "write"
 
+    def _on_averaged(self, entity, attribute, old, new, kwargs):
+        avg = self._averages.get(kwargs.get("name"))
+        if avg is not None:
+            avg.update(new, self.datetime(aware=True))
+
     def _log_row(self, obs, now, zone_state, reading):
         if not self.log_dir:
             return
+        # The decide tick also runs a reconcile; one row per 5-minute slot is enough.
+        if self._last_log and (now - self._last_log).total_seconds() < 60:
+            return
+        self._last_log = now
         try:
             row = {"ts": now.isoformat(timespec="seconds")}
             for k in ("outside_temp_met_office", "outside_temp_179_sensor", "outside_temp_177_sensor",
@@ -483,6 +505,13 @@ class Underflow(hass.Hass):
             for name, spec in self.log_columns.items():
                 ent, _, attr = str(spec).partition("|")
                 row[name] = self.get_state(ent, attribute=attr) if attr else self.get_state(ent)
+            for name, avg in self._averages.items():
+                m = avg.take(now)
+                row[name] = None if m is None else round(m, 1)
+            for name, spec in self.log_bus.items():
+                circuit, _, register = str(spec).partition(" ")
+                r = self.bus.read_register(circuit, register, max_age=60) if self.bus else None
+                row[name] = r.value if r is not None and r.ok else None
             row.update({
                 "desired_min_flow": self.desired, "bus_min_flow": reading.value if reading else None,
                 "source": self.source, "zone_desired": self.zone_desired, "zone_state": zone_state,

@@ -84,4 +84,16 @@ with tempfile.TemporaryDirectory() as d:
     assert p3 != p1 and os.path.basename(p3) == "u-2026-10-2.csv", p3
     assert datalog.append(d, "u", T0, {"ts": "d", "x": 1, "y": 1}) == p1   # old header still found
 
+# --- time average ---------------------------------------------------------------
+avg = datalog.TimeAverage()
+avg.update("1000", T0)
+avg.update("200", T0 + dt.timedelta(minutes=1))        # 1 min at 1000
+avg.update("unavailable", T0 + dt.timedelta(minutes=4))  # 3 min at 200, then a gap
+m = avg.take(T0 + dt.timedelta(minutes=5))              # gap not counted
+assert abs(m - (1000 * 60 + 200 * 180) / 240) < 1e-6, m
+avg.update("500", T0 + dt.timedelta(minutes=6))
+assert abs(avg.take(T0 + dt.timedelta(minutes=10)) - 500) < 1e-6   # only the known 4 min
+assert avg.take(T0 + dt.timedelta(minutes=15)) == 500   # unchanged sensor: held value
+fresh = datalog.TimeAverage(); assert fresh.take(T0) is None
+
 print("test_testplan: all passed")

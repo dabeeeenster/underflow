@@ -5,6 +5,17 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.1.2 — 2026-10-10
+
+Data-log fixes after its first hour:
+
+- `datalog.bus`: registers read off the bus for each row (`read -m 60`). ebusd polls the
+  HMU power and flow registers only every ~10 min, so the HA entities showed heat out
+  while the compressor was blocked and 0 kW in while it ran.
+- `datalog.averaged`: time-weighted means between rows (PV), instead of a snapshot.
+- One row per 5-minute slot: the half-hourly decide tick no longer adds a duplicate.
+- Changing the columns starts a new CSV (`…-2.csv`); existing files are never rewritten.
+
 ## 0.1.1 — 2026-10-10
 
 - The "what's going on" narrative knows about step tests: while one runs it says which
