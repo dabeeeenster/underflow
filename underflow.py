@@ -50,6 +50,8 @@ from reconcile import ReconcileConfig, RegisterState, decide
 from demand import Held, MirrorConfig, choose, hold
 from shared import SharedConfig, shared_step
 from probe import ProbeState, ProbeTarget, summarise, update
+from testplan import TestConfig, Step, test_step
+import datalog
 
 try:
     import numpy as np
@@ -140,6 +142,25 @@ class Underflow(hass.Hass):
                                            Ebusd(t.host, t.port, self.probe_timeout))
         self.probe_states = {t.name: ProbeState() for t in self.probes}
 
+        # --- stage-2 step tests: a fixed schedule of min-flow / zone-off blocks that
+        # replaces the planner while it runs. See testplan.py.
+        self.test_cfg = TestConfig.from_args(self.args.get("test"))
+        zc = self.args.get("zone", {}) or {}
+        self.zone_entity = zc.get("entity")          # select.heating_ebusd179_ctlv2_z1opmode
+        self.zone_script = zc.get("script")          # script.set_179_zone_mode
+        self.zone_desired = None                     # None = leave the zone alone
+        self._zone_last_write = None
+        self.step = Step(False)
+        self._guard_block = None
+        self._cap_block = None
+        self._test_was_active = False
+
+        # --- 5-minute CSV for fitting the models offline. See datalog.py.
+        lc = self.args.get("log", {}) or {}
+        self.log_dir = lc.get("dir")
+        self.log_prefix = lc.get("prefix", "underflow")
+        self.log_columns = dict(lc.get("columns", {}) or {})
+
         self.desired = self._recover_desired()
         self.desired_since = self.datetime(aware=True) if self.desired is not None else None
         self.source, self.source_reason = "none", "starting up"
@@ -149,8 +170,12 @@ class Underflow(hass.Hass):
         self._schedule(self.on_decide, self.interval)
         self._schedule(self.on_reconcile, self.reconcile_interval)
         self.run_in(self.on_decide, 10)
+        if self.test_cfg.enabled:
+            self.log(f"step test configured: {len(self.test_cfg.blocks)} blocks from "
+                     f"{self.test_cfg.start} to {self.test_cfg.end_at()}; floor {self.test_cfg.floor:g}")
         self.log(f"initialised; dry_run={self.dry_run}; decide/{self.interval}min "
                  f"reconcile/{self.reconcile_interval}min; probes={len(self.probes)}; "
+                 f"log={self.log_dir or 'off'}; "
                  f"recovered desired={self.desired}; "
                  f"numeric stack: {NUMERIC_OK}")
 
@@ -281,6 +306,12 @@ class Underflow(hass.Hass):
         proposed, source, reason = choose(self.held, result["setpoint_now"],
                                           obs.get("room_temp_mean"), self.planner_cfg,
                                           self.mirror_cfg, now)
+
+        # A running step test overrides everything above, price included.
+        self._update_step(obs, now)
+        if self.step.active:
+            proposed, source, reason = self.step.min_flow, "test", self.step.reason
+            result = dict(result, urgent=True)   # block edges must not wait out the dwell
         self.source, self.source_reason = source, reason
 
         # Deadband and minimum dwell: a "cheapest third" rule near its threshold flips as
@@ -377,6 +408,85 @@ class Underflow(hass.Hass):
                 **common, "friendly_name": "underflow shadow: copy 177",
                 "reason": why, "value_177": v177})
 
+    # ---- step test ------------------------------------------------------
+    def _update_step(self, obs, now):
+        prev = self.step
+        key = (prev.block.index, prev.block.start) if prev.block else None
+        warm_ent = self.entities.get("warmest_room")
+        step = test_step(self.test_cfg, now, obs.get("room_temp_mean"), self.planner_cfg.baseline,
+                         guard_latched=bool(key and self._guard_block == key),
+                         warmest=self._num(warm_ent) if warm_ent else None,
+                         cap_latched=bool(key and self._cap_block == key))
+        if step.block:
+            k = (step.block.index, step.block.start)
+            if step.guarded and self._guard_block != k:
+                self.log(f"step test guard: {step.reason}", level="WARNING")
+                self._alert(f"underflow test: {step.reason}")
+                self._guard_block = k
+            if step.capped and self._cap_block != k:
+                self.log(f"step test ceiling: {step.reason}")
+                self._cap_block = k
+        if step.active:
+            if not prev.active or (prev.block and step.block and prev.block.index != step.block.index):
+                self.log(f"step test: {step.reason}")
+            self.zone_desired = step.zone
+            self._test_was_active = True
+        elif self._test_was_active:
+            # Test over (or removed from config): put the zone back to normal once.
+            self.log("step test finished; zone back to day, planner resumes")
+            self.zone_desired = "day"
+            self._test_was_active = False
+        self.step = step
+
+    def _reconcile_zone(self, signal_on, stable_for, now):
+        """Keep zone 1's mode where the test wants it. The script does the bus write and
+        its own read-back; this only notices drift and asks again, at most every 3 min."""
+        if not (self.zone_entity and self.zone_desired):
+            return None, None
+        current = self.get_state(self.zone_entity)
+        if current == self.zone_desired:
+            if self.zone_desired == "day" and not self.step.active:
+                self.zone_desired = None             # restored; stop managing the zone
+            return current, "applied"
+        if not signal_on or stable_for < self.reconcile_cfg.settle_seconds:
+            return current, "waiting for a stable link"
+        if self._zone_last_write and (now - self._zone_last_write).total_seconds() < 180:
+            return current, "write in flight"
+        self._zone_last_write = now
+        if self.dry_run or not self.zone_script:
+            self.log(f"DRY RUN: would set zone {current} -> {self.zone_desired}")
+            return current, "dry run"
+        self.log(f"WRITE: {self.zone_script} mode={self.zone_desired} (was {current})")
+        self.call_service("script/turn_on", entity_id=self.zone_script,
+                          variables={"mode": self.zone_desired})
+        return current, "write"
+
+    def _log_row(self, obs, now, zone_state, reading):
+        if not self.log_dir:
+            return
+        try:
+            row = {"ts": now.isoformat(timespec="seconds")}
+            for k in ("outside_temp_met_office", "outside_temp_179_sensor", "outside_temp_177_sensor",
+                      "room_temp_mean", "flow_temp", "flow_temp_circuit", "return_temp",
+                      "power_in_kw", "power_out_kw", "heat_curve", "min_flow_temp", "max_flow_temp",
+                      "agile_rate_now", "pump_status", "mode"):
+                row[k] = obs.get(k)
+            for name, spec in self.log_columns.items():
+                ent, _, attr = str(spec).partition("|")
+                row[name] = self.get_state(ent, attribute=attr) if attr else self.get_state(ent)
+            row.update({
+                "desired_min_flow": self.desired, "bus_min_flow": reading.value if reading else None,
+                "source": self.source, "zone_desired": self.zone_desired, "zone_state": zone_state,
+                "test_block": (self.step.block.index + 1) if self.step.block else None,
+                "test_level": (self.step.block.level if self.step.block else None),
+                "test_guarded": self.step.guarded if self.step.active else None,
+                "test_capped": self.step.capped if self.step.active else None,
+                "dry_run": self.dry_run,
+            })
+            datalog.append(self.log_dir, self.log_prefix, now, row)
+        except Exception as exc:   # the log must never take the controller down
+            self.log(f"datalog failed: {exc!r}", level="WARNING")
+
     # ---- reconcile: make the register match ----------------------------
     def on_reconcile(self, kwargs=None):
         self._reconcile(self._observe(), self.datetime(aware=True))
@@ -394,6 +504,7 @@ class Underflow(hass.Hass):
         signal_on, stable_for = self._signal()
         decision, self.reg_state = decide(self.desired, reading, signal_on, stable_for,
                                           self.reg_state, now, self.reconcile_cfg)
+        zone_state, zone_action = self._reconcile_zone(signal_on, stable_for, now)
 
         extra = {
             "desired_min_flow": self.desired,
@@ -409,6 +520,13 @@ class Underflow(hass.Hass):
             "mirror_error": mirror_reading.error if mirror_reading else None,
             "reconcile_action": decision.action,
             "reconcile_reason": decision.reason,
+            "zone_state": zone_state,
+            "zone_desired": self.zone_desired,
+            "zone_action": zone_action,
+            "test_active": self.step.active,
+            "test_reason": self.step.reason if self.step.active else None,
+            "test_ends": (self.test_cfg.end_at().isoformat(timespec="minutes")
+                          if self.test_cfg.enabled and self.test_cfg.end_at() else None),
             **self.reg_state.as_attributes(),
         }
         self._publish_status(obs, extra)
@@ -423,6 +541,7 @@ class Underflow(hass.Hass):
             self._alert(decision.alert)
         if decision.writes:
             self._write(self.desired)
+        self._log_row(obs, now, zone_state, reading)
 
     def _read_own_register(self, now):
         """Get the register we control, preferring ebusd's cache when its provenance is

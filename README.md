@@ -95,6 +95,7 @@ Tests are standalone scripts: `uv run tests/<name>.py` (`test_model.py` also nee
 | `test_planner.py` | Planner rules on a synthetic Agile day |
 | `test_ebusd.py` | Reply parsing, the `-f` flag, a dead bus returns a `Reading` instead of raising |
 | `test_reconcile.py` | An unreadable bus never causes a write; backoff slows but never stops; alerts fire on duration |
+| `test_testplan.py` | Step-test blocks start and end on schedule, "off" asks for the zone off, floor and ceiling guards trip and latch; the CSV log keeps one header per file |
 | `test_demand.py` | Mirror held through a dropout, dropped when stale; caps and comfort band apply |
 | `test_shared.py` | Deadband, one step per tick, floor and cap, this half's rooms override the shared sensor |
 | `test_probe.py` | A steady value stays alive; blips are debounced; a missing device is found |
