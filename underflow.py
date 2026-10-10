@@ -156,7 +156,7 @@ class Underflow(hass.Hass):
         self._test_was_active = False
 
         # --- 5-minute CSV for fitting the models offline. See datalog.py.
-        lc = self.args.get("log", {}) or {}
+        lc = self.args.get("datalog", {}) or {}   # not "log": AppDaemon reserves it
         self.log_dir = lc.get("dir")
         self.log_prefix = lc.get("prefix", "underflow")
         self.log_columns = dict(lc.get("columns", {}) or {})
