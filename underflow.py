@@ -61,6 +61,11 @@ except Exception as exc:  # pragma: no cover
     NUMERIC_OK = f"missing: {exc}"
 
 
+# Bump on every release (see README, "Releases") and add a CHANGELOG.md entry. Published
+# on the status sensor so the dashboard shows which build is actually running.
+__version__ = "0.1.0"
+
+
 class Underflow(hass.Hass):
     def initialize(self):
         self.entities = self.args["entities"]
@@ -173,7 +178,7 @@ class Underflow(hass.Hass):
         if self.test_cfg.enabled:
             self.log(f"step test configured: {len(self.test_cfg.blocks)} blocks from "
                      f"{self.test_cfg.start} to {self.test_cfg.end_at()}; floor {self.test_cfg.floor:g}")
-        self.log(f"initialised; dry_run={self.dry_run}; decide/{self.interval}min "
+        self.log(f"initialised v{__version__}; dry_run={self.dry_run}; decide/{self.interval}min "
                  f"reconcile/{self.reconcile_interval}min; probes={len(self.probes)}; "
                  f"log={self.log_dir or 'off'}; "
                  f"recovered desired={self.desired}; "
@@ -283,6 +288,7 @@ class Underflow(hass.Hass):
         pin, pout = obs["power_in_kw"], obs["power_out_kw"]
         obs["cop_now"] = round(pout / pin, 2) if pin and pout and pin > 0.2 else None
         obs["dry_run"] = self.dry_run
+        obs["version"] = __version__
         obs["numeric_stack"] = NUMERIC_OK
         obs["last_run"] = self.datetime(aware=True).isoformat(timespec="seconds")
         return obs

@@ -227,8 +227,12 @@ keeps only `heating`.
 1. Copy every top-level `*.py` file into AppDaemon's `apps/` directory.
 2. Copy `apps.example.yaml` to `apps/apps.yaml` and fill in your entity ids.
 3. Check the AppDaemon add-on's log. You should see
-   `underflow: initialised; dry_run=True; ... numeric stack: numpy …, scipy …`, then a
-   `plan:` line every half hour.
+   `underflow: initialised v0.1.0; dry_run=True; ... numeric stack: numpy …, scipy …`,
+   then a `plan:` line every half hour.
+
+Install from a [release](https://github.com/dabeeeenster/underflow/releases) rather than
+`main`, so you know which version is running: the status sensor's `version` attribute
+says which build AppDaemon actually loaded.
 
 If you later add a new block to the app's config in `apps.yaml`, restart the AppDaemon
 add-on. AppDaemon can fail to reload the config (`KeyError` in `deep_compare`) and keep
@@ -241,6 +245,19 @@ running the app with the old settings.
   the bounds and reads the value back off the bus.
 - Before enabling any control stage, cap `MaxFlowTempDesired` on the heating circuit at
   what your floor can take (45 °C is usual for screed).
+
+## Releases
+
+Each deploy to a live pump is a tagged release, so the version on the dashboard maps to
+exact code.
+
+1. Bump `__version__` in `underflow.py` (semver; 0.x minor bumps may change config).
+2. Add a section to `CHANGELOG.md`.
+3. Run every test: `for t in tests/test_*.py; do uv run $t; done`.
+4. Commit, tag and publish:
+   `git tag -a vX.Y.Z -m vX.Y.Z && git push --follow-tags &&
+   gh release create vX.Y.Z --title vX.Y.Z --notes-file <the changelog section>`.
+5. Deploy that tag's `*.py` files and check the status sensor reports the new `version`.
 
 ## Licence
 
