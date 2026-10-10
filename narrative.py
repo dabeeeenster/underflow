@@ -49,7 +49,10 @@ def _dur(a: dt.datetime, b: dt.datetime):
     return f"{h} hour{'s' if h != 1 else ''}" + (f" {r} min" if r else "")
 
 
-def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage: str = "1") -> list[str]:
+def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage: str = "1",
+             test: dict | None = None, room_label: str = "the house") -> list[str]:
+    """`test`: {"reason": ..., "ends": datetime} while a step test is in charge (it replaces
+    the plan line). `room_label` names what `room_temp_mean` actually is."""
     lines = []
 
     # --- house and weather
@@ -57,7 +60,7 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
     if out is not None and room is not None:
         band = f"{cfg.comfort_min:g}–{cfg.comfort_max:g} °C"
         where = ("above" if room > cfg.comfort_max else "below" if room < cfg.comfort_min else "inside")
-        lines.append(f"It is {out:.1f} °C outside and the house is at {room:.1f} °C, {where} the comfort band of {band}.")
+        lines.append(f"It is {out:.1f} °C outside and {room_label} is at {room:.1f} °C, {where} the comfort band of {band}.")
 
     # --- heat pump
     status = obs.get("pump_status") or "unknown"
@@ -94,7 +97,11 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
 
     # --- the plan
     sp = plan.get("setpoint_now"); reason = plan.get("reason", "")
-    if sp is not None:
+    if test:
+        ends = test.get("ends")
+        until = f" until {_fmt_t(ends, now)}" if ends else ""
+        lines.append(f"Step test in charge{until}, price ignored: {test.get('reason')}.")
+    elif sp is not None:
         if sp <= cfg.baseline:
             action = f"leave the minimum flow temperature at {sp:g} °C so the heating curve alone decides"
         else:
@@ -107,7 +114,10 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
         lines.append(f"Dry run: nothing is being written to the heat pump. The room thermostats and {curve_txt} are in charge.")
     else:
         lines.append("Live: the controller writes the minimum flow temperature through the bounded script with read-back.")
-    lines.append(f"Stage {stage}: rule-based Agile shifting. The house and COP models are not yet fitted; that needs a month of heating data.")
+    if test:
+        lines.append("Stage 2: fixed blocks of heat and no heat, to fit the house model (lag, slab, sun). The planner resumes when the test ends.")
+    else:
+        lines.append(f"Stage {stage}: rule-based Agile shifting. The house and COP models are not yet fitted; the step tests and the 5-minute log are collecting the data.")
     return lines
 
 

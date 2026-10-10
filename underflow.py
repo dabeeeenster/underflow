@@ -63,7 +63,7 @@ except Exception as exc:  # pragma: no cover
 
 # Bump on every release (see README, "Releases") and add a CHANGELOG.md entry. Published
 # on the status sensor so the dashboard shows which build is actually running.
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 class Underflow(hass.Hass):
@@ -378,7 +378,10 @@ class Underflow(hass.Hass):
         )
         self.log(f"plan: min flow {self.desired} via {self.source} ({self.source_reason}); "
                  f"{result.get('cheap_slots')} cheap of {result.get('horizon_slots')} slots")
-        lines = describe(obs, result, now, cfg, self.dry_run)
+        test = ({"reason": self.step.reason, "ends": self.step.block.end if self.step.block else None}
+                if self.step.active else None)
+        lines = describe(obs, result, now, cfg, self.dry_run, test=test,
+                         room_label=self.args.get("room_label", "the house"))
         self._publish(
             self.narrative_entity,
             summary(lines),

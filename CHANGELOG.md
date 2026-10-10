@@ -5,6 +5,14 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.1.1 — 2026-10-10
+
+- The "what's going on" narrative knows about step tests: while one runs it says which
+  block is in charge and until when, instead of describing a price plan that isn't being
+  followed, and the stage line says stage 2.
+- New optional `room_label` (default "the house") so the narrative names what the room
+  sensor actually is — on 179 it is now the coldest room, not a mean.
+
 ## 0.1.0 — 2026-10-10
 
 First tagged release. Everything to date, as running on 179:
