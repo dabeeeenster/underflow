@@ -50,6 +50,7 @@ from demand import Held, MirrorConfig, choose, hold
 from shared import SharedConfig, shared_step
 from probe import ProbeState, ProbeTarget, summarise, update
 from testplan import TestConfig, Step, test_step
+import targets
 import datalog
 
 try:
@@ -62,7 +63,7 @@ except Exception as exc:  # pragma: no cover
 
 # Bump on every release (see README, "Releases") and add a CHANGELOG.md entry. Published
 # on the status sensor so the dashboard shows which build is actually running.
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 
 class Underflow(hass.Hass):
@@ -154,6 +155,13 @@ class Underflow(hass.Hass):
         self.zone_desired = None                     # None = leave the zone alone
         self._zone_last_write = None
         self.step = Step(False)
+        # Room targets adjustable from HA (targets.py): {key: input_number entity}. The
+        # apps.yaml values above are the fallback.
+        self.target_helpers = dict(self.args.get("targets", {}) or {})
+        self._base_planner_cfg, self._base_test_cfg = self.planner_cfg, self.test_cfg
+        self._targets_seen = None
+        for ent in self.target_helpers.values():
+            self.listen_state(self._on_target_change, ent)
         self._guard_block = None
         self._cap_block = None
         self._test_was_active = False
@@ -315,7 +323,29 @@ class Underflow(hass.Hass):
         return state
 
     # ---- decide: what should the register be? --------------------------
+    def _apply_targets(self):
+        if not self.target_helpers:
+            return
+        values = {k: self.get_state(ent) for k, ent in self.target_helpers.items()}
+        self.planner_cfg, self.test_cfg, notes = targets.apply(
+            self._base_planner_cfg, self._base_test_cfg, values)
+        seen = (self.planner_cfg.comfort_min, self.planner_cfg.comfort_max,
+                self.test_cfg.floor, self.test_cfg.ceiling, tuple(notes))
+        if seen != self._targets_seen:
+            self.log(f"targets: comfort {seen[0]:g}-{seen[1]:g}, test floor {seen[2]:g} "
+                     f"ceiling {seen[3]}" + (f"; {'; '.join(notes)}" if notes else ""),
+                     level="WARNING" if notes else "INFO")
+            self._targets_seen = seen
+
+    def _on_target_change(self, entity, attribute, old, new, kwargs):
+        """A slider moved: decide now rather than at the next half hour. Comfort moves
+        are urgent in the planner, so they skip the minimum dwell."""
+        if new != old and new not in (None, "unknown", "unavailable"):
+            self.log(f"target changed: {entity} {old} -> {new}; deciding now")
+            self.run_in(self.on_decide, 2)
+
     def on_decide(self, kwargs=None):
+        self._apply_targets()
         obs = self._observe()
         now = self.datetime(aware=True)
         result = plan(self._rates(), now, obs.get("room_temp_mean"), self.planner_cfg)
@@ -560,6 +590,10 @@ class Underflow(hass.Hass):
             "zone_desired": self.zone_desired,
             "zone_action": zone_action,
             "test_active": self.step.active,
+            "comfort_min": self.planner_cfg.comfort_min,
+            "comfort_max": self.planner_cfg.comfort_max,
+            "test_floor": self.test_cfg.floor if self.test_cfg.enabled else None,
+            "test_ceiling": self.test_cfg.ceiling if self.test_cfg.enabled else None,
             "test_reason": self.step.reason if self.step.active else None,
             "test_ends": (self.test_cfg.end_at().isoformat(timespec="minutes")
                           if self.test_cfg.enabled and self.test_cfg.end_at() else None),

@@ -5,6 +5,16 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.1.5 — 2026-10-11
+
+- Room targets adjustable from Home Assistant: `targets:` binds the comfort band
+  (`comfort_min`, `comfort_max`) and the step test's `test_floor` / `test_ceiling` to
+  HA number helpers. Read on every decide tick, and a change triggers a decision straight
+  away. apps.yaml values remain the fallback; a value outside sane bounds, or a band
+  whose floor isn't below its top, is ignored and logged (`targets.py`).
+- The status sensor publishes the effective `comfort_min`, `comfort_max`, `test_floor`
+  and `test_ceiling`.
+
 ## 0.1.4 — 2026-10-11
 
 - The bus probes no longer sleep 3 s between devices. The spacing dated from when they
