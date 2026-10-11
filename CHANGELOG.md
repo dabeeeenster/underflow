@@ -5,6 +5,13 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.1.3 — 2026-10-11
+
+- Writes start the min-flow script with `script.turn_on` instead of calling it and
+  waiting. The script's write and read-back take ~30 s, so every write blocked the
+  callback until HA's 10 s request timeout and logged "Timed out waiting for request".
+  Writes always landed; the next reconcile still verifies them off the bus.
+
 ## 0.1.2 — 2026-10-10
 
 Data-log fixes after its first hour:

@@ -63,7 +63,7 @@ except Exception as exc:  # pragma: no cover
 
 # Bump on every release (see README, "Releases") and add a CHANGELOG.md entry. Published
 # on the status sensor so the dashboard shows which build is actually running.
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 
 class Underflow(hass.Hass):
@@ -637,7 +637,13 @@ class Underflow(hass.Hass):
         self.log(f"WRITE: {self.write_script} flow_temp={value}")
         # quiet=True: the script's own two-try alert would fire on every WiFi blip, and
         # this loop is the thing that retries. Sustained failure is alerted from here.
-        self.call_service(self.write_script, flow_temp=value, quiet=True)
+        # Started with script.turn_on, not called directly: the script's write + read-back
+        # takes ~30 s, and calling it blocked this callback until HA's 10 s request
+        # timeout ("Timed out waiting for request") on every write. Nothing here needs the
+        # result — the next reconcile reads the register off the wire.
+        entity = self.write_script.replace("/", ".", 1) if "/" in self.write_script else self.write_script
+        self.call_service("script/turn_on", entity_id=entity,
+                          variables={"flow_temp": value, "quiet": True})
         # The next reconcile must see the wire, not a cache that predates the write.
         self._force_next_read = True
 
