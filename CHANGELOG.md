@@ -5,6 +5,13 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.1.4 — 2026-10-11
+
+- The bus probes no longer sleep 3 s between devices. The spacing dated from when they
+  were real `read -f` bus reads; since they became `find -V` cache queries it bought
+  nothing and held every 5-minute reconcile for ~10 s ("Excessive time spent in
+  callback"). `probes.stagger_seconds` is no longer read.
+
 ## 0.1.3 — 2026-10-11
 
 - Writes start the min-flow script with `script.turn_on` instead of calling it and

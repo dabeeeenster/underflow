@@ -31,8 +31,8 @@ That matters more than traffic share suggests. A forced read is a real eBUS tran
 210-390 ms against 2.5 ms from cache — and these adapters tunnel a *real-time* protocol
 over 2.4 GHz WiFi, which is why ebusd runs `--latency=100` here. Arbitration is timing
 sensitive, so on a marginal link the right amount of extra traffic to add for monitoring
-is none. Reads are also staggered rather than fired back to back, and backed off once a
-device is already known down: a failing link is the last one to hammer.
+is none. A device already known down is probed only every few cycles: a failing link is
+the last one to add load to, even through ebusd.
 
 Debouncing matters because 177's adapter drops out roughly thirty times a day, mostly for
 half a minute. A single failed read is a WiFi blip; `dead_after` consecutive failures

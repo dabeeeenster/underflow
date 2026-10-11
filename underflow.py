@@ -38,7 +38,6 @@ All entity ids come from apps.yaml; nothing is hard-coded to a particular house.
 """
 import dataclasses
 import datetime as dt
-import time
 
 import appdaemon.plugins.hass.hassapi as hass
 
@@ -63,7 +62,7 @@ except Exception as exc:  # pragma: no cover
 
 # Bump on every release (see README, "Releases") and add a CHANGELOG.md entry. Published
 # on the status sensor so the dashboard shows which build is actually running.
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 
 class Underflow(hass.Hass):
@@ -135,7 +134,6 @@ class Underflow(hass.Hass):
         # A device counts as answering while ebusd has had its value off the wire within
         # stale_after; the targets are registers ebusd polls every ~10-15 s by itself.
         self.probe_stale_after = float(pb.get("stale_after", 300.0))
-        self.probe_stagger = float(pb.get("stagger_seconds", 3.0))
         # Once a device is known down, stop probing it every cycle. A failing link is the
         # last thing to add traffic to, and recovery within a few cycles is soon enough.
         self.probe_down_every = int(pb.get("down_every_cycles", 3))
@@ -600,11 +598,13 @@ class Underflow(hass.Hass):
 
     # ---- liveness probes -----------------------------------------------
     def _run_probes(self, now):
-        """Force one read per device and publish a debounced alive/dead verdict.
+        """Ask ebusd when it last had each device's value off the wire (`find -V`) and
+        publish a debounced alive/dead verdict.
 
-        `read -f` goes to the wire, so a device either answers or it does not — unlike
-        an HA entity's staleness, which cannot tell a steady value from a silent one.
-        A single failure is a WiFi blip; `dead_after` consecutive ones is a device gone.
+        This is a query to ebusd's cache, not a bus transaction, so the four probes run
+        back to back. (Until 0.1.4 they were spaced 3 s apart with time.sleep, a leftover
+        from when they were `read -f`; that held every reconcile callback for ~10 s.)
+        A single miss is a WiFi blip; `dead_after` consecutive ones is a device gone.
         """
         if not self.probes:
             return
@@ -613,8 +613,6 @@ class Underflow(hass.Hass):
             was_dead = self.probe_states[t.name].dead(self.probe_dead_after)
             if was_dead and self._probe_cycle % self.probe_down_every:
                 continue          # already down: don't hammer a failing link every cycle
-            if i and self.probe_stagger:
-                time.sleep(self.probe_stagger)   # spread the reads across the cycle
             reading = self._probe_clients[(t.host, t.port)].find_register(t.circuit, t.register)
             self.probe_states[t.name] = update(
                 self.probe_states[t.name], reading, now, self.probe_stale_after)
