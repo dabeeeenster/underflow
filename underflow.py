@@ -67,7 +67,7 @@ except Exception as exc:  # pragma: no cover
 
 # Bump on every release (see README, "Releases") and add a CHANGELOG.md entry. Published
 # on the status sensor so the dashboard shows which build is actually running.
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 
 class Underflow(hass.Hass):
@@ -202,6 +202,7 @@ class Underflow(hass.Hass):
         self.shadow = SH.Shadow(scfg, float(mc.get("max_forecast_age_h", 6))) if scfg else None
         self._last_row = None
         self._last_shadow = None
+        self._write_at = None
         self._forecast_err = None
 
         self.desired = self._recover_desired()
@@ -771,7 +772,15 @@ class Underflow(hass.Hass):
         if decision.alert:
             self._alert(decision.alert)
         if decision.writes:
-            self._write(self.desired)
+            # Since writes start the script without waiting (0.1.3), a reconcile right
+            # after one still reads the old value; don't fire the same write twice while
+            # the first (~30 s with read-back) is in flight.
+            last = self._write_at
+            if last and last[1] == self.desired and (now - last[0]).total_seconds() < 90:
+                self.log(f"write of {self.desired} already in flight; not repeating")
+            else:
+                self._write(self.desired)
+                self._write_at = (now, self.desired)
         self._log_row(obs, now, zone_state, reading)
         self._shadow_observe(obs, now)
         self._save_state(now)

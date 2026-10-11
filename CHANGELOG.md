@@ -5,6 +5,12 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.2.2 — 2026-10-11
+
+- A write already in flight (< 90 s, same value) is not repeated. The decide tick and the
+  5-minute reconcile both fire on the half hour; since writes became non-blocking the
+  second still read the old register value and wrote again (seen 12:00 11 Oct).
+
 ## 0.2.1 — 2026-10-11
 
 Restart tolerance. Ben restarts Home Assistant routinely for updates, and every HA restart
