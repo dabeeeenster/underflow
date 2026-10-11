@@ -51,6 +51,8 @@ from shared import SharedConfig, shared_step
 from probe import ProbeState, ProbeTarget, summarise, update
 from testplan import TestConfig, Step, test_step
 import targets
+import forecast as F
+import shadow as SH
 import datalog
 
 try:
@@ -63,7 +65,7 @@ except Exception as exc:  # pragma: no cover
 
 # Bump on every release (see README, "Releases") and add a CHANGELOG.md entry. Published
 # on the status sensor so the dashboard shows which build is actually running.
-__version__ = "0.1.6"
+__version__ = "0.2.0"
 
 
 class Underflow(hass.Hass):
@@ -184,6 +186,21 @@ class Underflow(hass.Hass):
         # for them are stale between polls; `read -m 60` costs at most one transaction.
         self.log_bus = dict(lc.get("bus", {}) or {})
         self._last_log = None
+
+        # --- stage-2 model planner, shadow only (shadow.py): plans and publishes, never
+        # writes. Needs fitted parameters under `model.params`; without them it says so.
+        mc = self.args.get("model", {}) or {}
+        self.model_entity = mc.get("entity", self.status_entity + "_model_plan")
+        self.model_forecast = dict(mc.get("forecast", {}) or {})
+        try:
+            scfg = SH.ShadowConfig.from_args(mc)
+        except Exception as exc:
+            scfg = None
+            self.log(f"model config rejected: {exc!r}", level="WARNING")
+        self.shadow = SH.Shadow(scfg, float(mc.get("max_forecast_age_h", 6))) if scfg else None
+        self._last_row = None
+        self._last_shadow = None
+        self._forecast_err = None
 
         self.desired = self._recover_desired()
         self.desired_since = self.datetime(aware=True) if self.desired is not None else None
@@ -378,6 +395,7 @@ class Underflow(hass.Hass):
 
         self._publish_plan(result, obs, now)
         self._publish_shadows(result, obs, now)
+        self._shadow_plan(obs, now)
         self._reconcile(obs, now)
 
     def _rates(self):
@@ -549,9 +567,82 @@ class Underflow(hass.Hass):
                 "test_capped": self.step.capped if self.step.active else None,
                 "dry_run": self.dry_run,
             })
+            if self._last_shadow:
+                row["model_level"] = self._last_shadow.get("state")
+                row["model_pred_3h"] = self._last_shadow.get("predicted_coldest_3h")
+                row["model_slab_est"] = self._last_shadow.get("slab_estimate")
             datalog.append(self.log_dir, self.log_prefix, now, row)
+            self._last_row = row
         except Exception as exc:   # the log must never take the controller down
             self.log(f"datalog failed: {exc!r}", level="WARNING")
+
+    # ---- stage-2 model planner (shadow) ---------------------------------
+    def _shadow_observe(self, obs, now):
+        if not self.shadow or not self._last_row:
+            return
+        try:
+            row = self._last_row
+            heat = None
+            if obs.get("mode") == "heating":
+                try:
+                    heat = float(row.get(self.model_forecast.get("heat_column", "heat_out_kw_bus")))
+                except (TypeError, ValueError):
+                    heat = None
+            pv = row.get("pv_w")
+            self.shadow.observe(now, obs.get("room_temp_mean"), heat or 0.0,
+                                obs.get("outside_temp_met_office"),
+                                (float(pv) / 1000.0) if isinstance(pv, (int, float)) else 0.0)
+        except Exception as exc:
+            self.log(f"model observe failed: {exc!r}", level="WARNING")
+
+    def _fetch_forecasts(self, now):
+        met = sol = None
+        ent = self.model_forecast.get("weather")
+        if ent:
+            try:
+                resp = self.call_service("weather/get_forecasts", entity_id=ent, type="hourly",
+                                         return_response=True)
+                met = F.parse_met(F.find_forecast_list(resp))
+                if not met:
+                    raise ValueError(f"no hourly forecast in response ({type(resp).__name__})")
+            except Exception as exc:
+                if repr(exc) != self._forecast_err:
+                    self.log(f"temperature forecast unavailable: {exc!r}", level="WARNING")
+                    self._forecast_err = repr(exc)
+        lists = [self.get_state(e, attribute="detailedForecast") for e in self.model_forecast.get("solcast", [])]
+        sol = F.parse_solcast(*[l for l in lists if isinstance(l, list)])
+        self.shadow.cache.offer(now, met=met or None, sol=sol or None)
+
+    def _shadow_plan(self, obs, now):
+        if not self.shadow:
+            if self.args.get("model"):
+                self._publish(self.model_entity, "waiting", {
+                    "friendly_name": "underflow model planner (shadow)", "icon": "mdi:brain",
+                    "reason": "no fitted parameters yet (model.params)"})
+            return
+        try:
+            self._fetch_forecasts(now)
+            out = self.shadow.plan(now, self._rates(), self.planner_cfg.comfort_min,
+                                   obs.get("outside_temp_met_office"))
+            self._last_shadow = out
+            state = out.pop("state")
+            self._publish(self.model_entity, state, {
+                "friendly_name": "underflow model planner (shadow)", "icon": "mdi:brain",
+                "shadow": True, "updated": now.isoformat(timespec="seconds"),
+                "floor": self.planner_cfg.comfort_min, "top": self.shadow.cfg.top, **out})
+            out["state"] = state
+            for key, label in (("predicted_coldest_3h", "predicted coldest room in 3 h"),
+                               ("slab_estimate", "estimated slab temperature")):
+                if out.get(key) is not None:
+                    self._publish(f"{self.model_entity}_{key}", out[key], {
+                        "friendly_name": f"underflow model: {label}", "unit_of_measurement": "°C",
+                        "device_class": "temperature", "state_class": "measurement",
+                        "icon": "mdi:brain"})
+            self.log(f"model (shadow): {state} now; coldest in 3 h {out.get('predicted_coldest_3h')} °C; "
+                     f"24 h {out.get('elec_kwh_24h')} kWh £{out.get('cost_24h_gbp')}"
+                     + (f"; {'; '.join(out['notes'])}" if out.get("notes") else ""))
+        except Exception as exc:
+            self.log(f"model plan failed: {exc!r}", level="WARNING")
 
     # ---- reconcile: make the register match ----------------------------
     def on_reconcile(self, kwargs=None):
@@ -612,6 +703,7 @@ class Underflow(hass.Hass):
         if decision.writes:
             self._write(self.desired)
         self._log_row(obs, now, zone_state, reading)
+        self._shadow_observe(obs, now)
 
     def _read_own_register(self, now):
         """Get the register we control, preferring ebusd's cache when its provenance is

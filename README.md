@@ -95,6 +95,7 @@ Tests are standalone scripts: `uv run tests/<name>.py` (`test_model.py` also nee
 | `test_planner.py` | Planner rules on a synthetic Agile day |
 | `test_ebusd.py` | Reply parsing, the `-f` flag, a dead bus returns a `Reading` instead of raising |
 | `test_reconcile.py` | An unreadable bus never causes a write; backoff slows but never stops; alerts fire on duration |
+| `test_forecast_mpc.py` | Forecast parsing and offline fallback; model planner keeps the room above the floor, banks heat in cheap slots, heats less with sun, nothing for a warm house, deterministic; shadow filter and plan output |
 | `test_targets.py` | HA slider values override the comfort band and test guards; out-of-range, unparsable or upside-down values fall back to apps.yaml |
 | `test_testplan.py` | Step-test blocks start and end on schedule, "off" asks for the zone off, floor and ceiling guards trip and latch; the CSV log keeps one header per file |
 | `test_demand.py` | Mirror held through a dropout, dropped when stale; caps and comfort band apply |

@@ -5,6 +5,30 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.2.0 — 2026-10-11
+
+Stage 2 groundwork: a model planner, running as a **shadow** (plans and publishes, never
+writes).
+
+- `forecast.py`: Met Office hourly temperature (`weather.get_forecasts`) and Solcast
+  half-hourly PV (the sun proxy) per half-hour slot. Offline fallback: last good forecast
+  while under `max_forecast_age_h` (6 h), then current outside temperature held flat and
+  **no sun** — errs towards more heat, never less.
+- `mpc.py`: simulates slab and rooms with the house model and buys, greedily, the cheapest
+  heat (price × heat ÷ COP) that keeps the coldest room above the comfort floor (+0.3 K
+  margin) and the warmest below `top`, across the whole horizon so cheap heat is banked in
+  the slab ahead of need. Levels are zone off or a minimum flow; every higher level is
+  tried per slot (a level below the pump's own curve flow adds nothing). Deterministic.
+- `shadow.py`: Kalman filter tracking the hidden slab temperature every 5 min from the
+  coldest room and the heat actually going in; publishes `<status>_model_plan` with the
+  24 h plan, predicted coldest room at 1/3/6 h, slab estimate, cost and forecast notes,
+  plus graphable `_predicted_coldest_3h` and `_slab_estimate` sensors. The data log gains
+  `model_level`, `model_pred_3h`, `model_slab_est`.
+- `tools/fit_log.py`: fits house, emitter, COP and room spread from the 5-minute data log
+  with a held-out forecast check, and prints the `model:` block for apps.yaml.
+- New config block `model:` (parameters, planner levels, forecast entities). Without
+  `model.params` the shadow reports that it is waiting for a fit.
+
 ## 0.1.6 — 2026-10-11
 
 - Works without the internet: when no Agile prices are known (Octopus unreachable long

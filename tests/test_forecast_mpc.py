@@ -1,0 +1,112 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["numpy>=2", "scipy>=1.13"]
+# ///
+"""Run: uv run tests/test_forecast_mpc.py
+
+Forecasts: parsed from the real response shapes, interpolated onto half-hour slots, and
+when missing or stale the fallback errs towards more heat (flat temperature, no sun).
+Planner: on a known synthetic house it keeps the room above the floor, buys the heat in
+the cheap slots ahead of the need (the slab lag), heats less when sun is forecast, never
+heats a warm house, and is deterministic.
+"""
+import sys, pathlib, datetime as dt
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+import numpy as np
+import forecast as F
+from model import HouseParams
+from mpc import MpcConfig, plan, OFF
+
+UTC = dt.timezone.utc
+T0 = dt.datetime(2026, 10, 12, 0, 0, tzinfo=UTC)
+
+# --- forecast parsing ---------------------------------------------------------------
+resp = {"weather.met_office_wood_green": {"forecast": [
+    {"datetime": "2026-10-12T00:00:00+00:00", "temperature": 10.0},
+    {"datetime": "2026-10-12T01:00:00+00:00", "temperature": 12.0}]}}
+met = F.parse_met(F.find_forecast_list({"result": {"response": resp}}))   # nested wrapper
+assert met == [(T0, 10.0), (T0 + dt.timedelta(hours=1), 12.0)], met
+sol = F.parse_solcast([{"period_start": "2026-10-12T00:00:00+00:00", "pv_estimate": 0.5}],
+                      [{"period_start": "2026-10-12T00:30:00+00:00", "pv_estimate": 1.5}])
+assert sol == [(T0, 0.5), (T0 + dt.timedelta(minutes=30), 1.5)], sol
+
+cache = F.ForecastCache(max_age_h=6)
+cache.offer(T0, met=met, sol=sol)
+slots = F.slot_starts(T0 + dt.timedelta(minutes=10), 1.5)
+assert slots == [T0, T0 + dt.timedelta(minutes=30), T0 + dt.timedelta(hours=1)], slots
+t_out, solar, notes = cache.inputs(slots, T0, outside_now=9.0)
+assert abs(t_out[0] - 10.5) < 1e-9 and abs(t_out[1] - 11.5) < 1e-9, t_out   # mid-slot interpolation
+assert t_out[2] == 11.5 and solar == [0.5, 1.5, 0.0], (t_out, solar)            # beyond: held, no sun
+assert any("covers 2 of 3" in n for n in notes), notes
+
+stale = T0 + dt.timedelta(hours=7)                                             # forecast too old
+t_out, solar, notes = cache.inputs(F.slot_starts(stale, 1), stale, outside_now=8.0)
+assert t_out == [8.0, 8.0] and solar == [0.0, 0.0], (t_out, solar)
+assert any("no usable temperature" in n for n in notes) and any("assuming no sun" in n for n in notes)
+t_out, _, _ = F.ForecastCache().inputs(F.slot_starts(T0, 0.5), T0, outside_now=None)
+assert t_out == [10.0], t_out                                                  # nothing at all
+
+# --- planner on a synthetic house -------------------------------------------------------
+P = HouseParams(c_slab=25.0, c_room=4.0, r_sr=1.5, r_ro=10.0, g_room=0.6, g_slab=0.2)
+cfg = MpcConfig(levels=(OFF, 20.0, 25.0, 32.0, 38.0), k_emit=0.6, q_max=5.0, cop_eta=0.4,
+                curve=0.2, zone_setpoint=23.0, spread=1.0)
+n = 48
+cold_night = [8.0] * n
+dark = [0.0] * n
+cheap_night = [0.02 if k < 12 else 0.30 for k in range(n)]       # first 6 h cheap
+r = plan(P, cfg, slab0=22.0, room0=21.0, t_out=cold_night, solar=dark, prices=cheap_night,
+         floor=20.0, top=23.5)
+assert not r.breaches, (r.breaches, r.coldest.min())
+assert (r.coldest[1:] + cfg.spread).max() <= 23.5 + 1e-6
+early = sum(r.heat_kw[:12]); late = sum(r.heat_kw[12:])
+assert early > late, ("cheap first six hours should carry most of the heat (slab banking)", early, late)
+assert r.coldest[1:].min() >= 20.0 + cfg.margin - 1e-6, "plans to the floor plus margin"
+
+# Same night, flat prices: the cheap-night plan costs less than an all-at-38 plan
+r_all = plan(P, cfg, 22.0, 21.0, cold_night, dark, cheap_night, floor=20.0, top=99)  # unconstrained top
+assert r.cost <= r_all.cost + 1e-9
+
+# Sun forecast reduces the heat bought
+sunny = [2.0 if 16 <= k < 32 else 0.0 for k in range(n)]
+r_sun = plan(P, cfg, 22.0, 21.0, cold_night, sunny, cheap_night, floor=20.0, top=23.5)
+assert r_sun.elec_kwh < r.elec_kwh, (r_sun.elec_kwh, r.elec_kwh)
+
+# Warm house, mild weather: nothing bought
+r_warm = plan(P, cfg, 23.0, 22.0, [16.0] * n, dark, cheap_night, floor=19.0, top=23.5)
+assert all(l == OFF for l in r_warm.levels), r_warm.levels
+
+# Deterministic
+r2 = plan(P, cfg, 22.0, 21.0, cold_night, dark, cheap_night, floor=20.0, top=23.5)
+assert r2.levels == r.levels and abs(r2.cost - r.cost) < 1e-12
+
+# Unknown prices still produce a comfort-only plan
+r_np = plan(P, cfg, 22.0, 21.0, cold_night, dark, [None] * n, floor=20.0, top=23.5)
+assert not r_np.breaches
+
+# Off not allowed: lowest level is the baseline flow
+r_no_off = plan(P, cfg, 23.0, 22.0, [16.0] * n, dark, cheap_night, floor=19.0, top=23.5, allow_off=False)
+assert OFF not in r_no_off.levels
+
+print(f"forecast+mpc OK: cheap-night plan {r.elec_kwh:.1f} kWh £{r.cost:.2f} "
+      f"(heat in cheap 6 h: {early*0.5:.1f} kWh, after: {late*0.5:.1f}); sunny day {r_sun.elec_kwh:.1f} kWh")
+
+# --- shadow: config parsing, filter, plan output -------------------------------------
+import shadow as SH
+sc = SH.ShadowConfig.from_args({"provisional": True, "top": 23.5,
+                                "params": {"c_slab": 15.0, "c_room": 1.08, "r_sr": 1.14, "r_ro": 3.63, "g_room": 1.75, "g_slab": 0.0},
+                                "mpc": {"k_emit": 0.27, "q_max": 6.9, "cop_eta": 0.39, "spread": 1.0, "levels": ["off", 20, 25, 32, 38]}})
+assert sc and sc.mpc.levels[0] == OFF and sc.mpc.levels[-1] == 38.0, sc
+assert SH.ShadowConfig.from_args({"mpc": {}}) is None           # no params: no shadow
+sh = SH.Shadow(sc)
+assert sh.plan(T0, [], 20.0, 10.0)["state"] == "waiting"
+for i in range(12):                                             # an hour of observations
+    sh.observe(T0 + dt.timedelta(minutes=5 * i), 20.8 - 0.01 * i, 0.0, 10.0, 0.0)
+assert sh.slab is not None and abs(sh.room - 20.7) < 0.2, (sh.slab, sh.room)
+sh.cache.offer(T0, met=[(T0 + dt.timedelta(hours=h), 9.0) for h in range(30)], sol=[])
+rates = [(T0 + dt.timedelta(minutes=30 * k), 0.02 if k < 12 else 0.3) for k in range(48)]
+out = sh.plan(T0 + dt.timedelta(hours=1), rates, 20.0, 9.5)
+assert out["state"] in ("off", "20", "25", "32", "38") and len(out["slots"]) == 48, out["state"]
+assert out["predicted_coldest_3h"] is not None and any("sun" in n for n in out["notes"]), out["notes"]
+sh.observe(T0 + dt.timedelta(hours=3), 20.5, 0.0, 10.0, 0.0)    # 2 h gap: filter restarts on the reading
+assert abs(sh.room - 20.5) < 1e-9
+print("shadow OK: plan", out["state"], "now, coldest in 3 h", out["predicted_coldest_3h"], "slab", out["slab_estimate"])
