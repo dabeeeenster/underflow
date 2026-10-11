@@ -49,7 +49,9 @@ from reconcile import ReconcileConfig, RegisterState, decide
 from demand import Held, MirrorConfig, choose, hold
 from shared import SharedConfig, shared_step
 from probe import ProbeState, ProbeTarget, summarise, update
-from testplan import TestConfig, Step, test_step
+from testplan import TestConfig, Step, test_step, current_block
+import persist
+import numpy as np
 import targets
 import forecast as F
 import shadow as SH
@@ -65,7 +67,7 @@ except Exception as exc:  # pragma: no cover
 
 # Bump on every release (see README, "Releases") and add a CHANGELOG.md entry. Published
 # on the status sensor so the dashboard shows which build is actually running.
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 
 class Underflow(hass.Hass):
@@ -204,6 +206,10 @@ class Underflow(hass.Hass):
 
         self.desired = self._recover_desired()
         self.desired_since = self.datetime(aware=True) if self.desired is not None else None
+        # Everything above that matters across a restart is overwritten from the state
+        # file if there is a recent one (persist.py). Ben restarts HA for updates.
+        self.state_file = self.args.get("state_file")
+        self.restored = self._restore_state()
         self.source, self.source_reason = "none", "starting up"
         self._unknown_codes = set()
         self._last_decision = None
@@ -479,19 +485,21 @@ class Underflow(hass.Hass):
     # ---- step test ------------------------------------------------------
     def _update_step(self, obs, now):
         prev = self.step
-        key = (prev.block.index, prev.block.start) if prev.block else None
+        # Latches are keyed to the block they tripped in and compared with the block
+        # running *now* — not the previous tick's, which is empty after a restart.
+        cur = current_block(self.test_cfg, now)
         warm_ent = self.entities.get("warmest_room")
         step = test_step(self.test_cfg, now, obs.get("room_temp_mean"), self.planner_cfg.baseline,
-                         guard_latched=bool(key and self._guard_block == key),
+                         guard_latched=persist.same_block(self._guard_block, cur),
                          warmest=self._num(warm_ent) if warm_ent else None,
-                         cap_latched=bool(key and self._cap_block == key))
+                         cap_latched=persist.same_block(self._cap_block, cur))
         if step.block:
-            k = (step.block.index, step.block.start)
-            if step.guarded and self._guard_block != k:
+            k = persist.block_key(step.block)
+            if step.guarded and not persist.same_block(self._guard_block, step.block):
                 self.log(f"step test guard: {step.reason}", level="WARNING")
                 self._alert(f"underflow test: {step.reason}")
                 self._guard_block = k
-            if step.capped and self._cap_block != k:
+            if step.capped and not persist.same_block(self._cap_block, step.block):
                 self.log(f"step test ceiling: {step.reason}")
                 self._cap_block = k
         if step.active:
@@ -575,6 +583,67 @@ class Underflow(hass.Hass):
             self._last_row = row
         except Exception as exc:   # the log must never take the controller down
             self.log(f"datalog failed: {exc!r}", level="WARNING")
+
+    # ---- restart tolerance ----------------------------------------------
+    def _save_state(self, now):
+        if not self.state_file:
+            return
+        try:
+            st = {"desired": self.desired, "desired_since": self.desired_since,
+                  "guard_block": self._guard_block, "cap_block": self._cap_block,
+                  "test_was_active": self._test_was_active, "zone_desired": self.zone_desired,
+                  "last_log": self._last_log}
+            if self.shadow is not None:
+                kf, c = self.shadow.kf, self.shadow.cache
+                st["kf"] = None if kf.x is None else {"x": kf.x.tolist(), "P": kf.P.tolist(),
+                                                      "at": self.shadow.last_obs}
+                st["forecast"] = {"met": persist.series_out(c.met), "met_at": c.met_at,
+                                  "sol": persist.series_out(c.sol), "sol_at": c.sol_at}
+            persist.save(self.state_file, st, now)
+        except Exception as exc:          # never let persistence take control down
+            self.log(f"state save failed: {exc!r}", level="WARNING")
+
+    def _restore_state(self):
+        if not self.state_file:
+            return None
+        now = self.datetime(aware=True)
+        doc = persist.load(self.state_file, now)
+        if not doc:
+            self.log(f"no recent saved state at {self.state_file}; starting fresh")
+            return None
+        restored = []
+        try:
+            if doc.get("desired") is not None:
+                self.desired = float(doc["desired"])
+                self.desired_since = persist._dt(doc.get("desired_since")) or now
+                restored.append(f"target {self.desired:g}")
+            self._guard_block, self._cap_block = doc.get("guard_block"), doc.get("cap_block")
+            if self._guard_block or self._cap_block:
+                restored.append("test guard latches")
+            self._test_was_active = bool(doc.get("test_was_active"))
+            if doc.get("zone_desired"):
+                self.zone_desired = doc["zone_desired"]
+                restored.append(f"zone wanted {self.zone_desired}")
+            self._last_log = persist._dt(doc.get("last_log"))
+            kf = doc.get("kf")
+            at = persist._dt(kf.get("at")) if kf else None
+            if self.shadow is not None and kf and at and (now - at).total_seconds() < 3600:
+                self.shadow.kf.x = np.array(kf["x"], float)
+                self.shadow.kf.P = np.array(kf["P"], float)
+                self.shadow.last_obs = at
+                restored.append(f"slab estimate {self.shadow.slab:.1f}")
+            fc = doc.get("forecast")
+            if self.shadow is not None and fc:
+                c = self.shadow.cache
+                c.met, c.met_at = persist.series_in(fc.get("met")), persist._dt(fc.get("met_at"))
+                c.sol, c.sol_at = persist.series_in(fc.get("sol")), persist._dt(fc.get("sol_at"))
+                restored.append("forecasts")
+        except Exception as exc:
+            self.log(f"saved state unusable ({exc!r}); starting fresh", level="WARNING")
+            return None
+        age = (now - doc["saved_at"]).total_seconds() / 60
+        self.log(f"restored state saved {age:.0f} min ago: {', '.join(restored) or 'nothing to restore'}")
+        return doc["saved_at"]
 
     # ---- stage-2 model planner (shadow) ---------------------------------
     def _shadow_observe(self, obs, now):
@@ -681,6 +750,7 @@ class Underflow(hass.Hass):
             "zone_desired": self.zone_desired,
             "zone_action": zone_action,
             "test_active": self.step.active,
+            "state_restored_from": self.restored.isoformat(timespec="minutes") if self.restored else None,
             "comfort_min": self.planner_cfg.comfort_min,
             "comfort_max": self.planner_cfg.comfort_max,
             "test_floor": self.test_cfg.floor if self.test_cfg.enabled else None,
@@ -704,6 +774,7 @@ class Underflow(hass.Hass):
             self._write(self.desired)
         self._log_row(obs, now, zone_state, reading)
         self._shadow_observe(obs, now)
+        self._save_state(now)
 
     def _read_own_register(self, now):
         """Get the register we control, preferring ebusd's cache when its provenance is

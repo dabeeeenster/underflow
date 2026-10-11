@@ -5,6 +5,21 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.2.1 — 2026-10-11
+
+Restart tolerance. Ben restarts Home Assistant routinely for updates, and every HA restart
+makes AppDaemon re-initialise the app.
+
+- `persist.py` + `state_file:` — the target, step-test guard latches, "a test was running",
+  the zone underflow wants, the Kalman slab estimate (if under 1 h old) and the forecast
+  cache are written atomically to a JSON file after every tick and restored on start-up.
+  Missing, corrupt, foreign or >24 h-old files are ignored. Before this, a target was
+  recovered from an HA sensor that an HA restart wipes, and —
+- fixed: a floor guard that had tripped would un-latch after a restart (latches were
+  compared with the previous tick's block, empty after a restart), so a cold room's off
+  block could resume. Latches are now compared with the block running now.
+- The status sensor publishes `state_restored_from` (when the restored state was saved).
+
 ## 0.2.0 — 2026-10-11
 
 Stage 2 groundwork: a model planner, running as a **shadow** (plans and publishes, never
