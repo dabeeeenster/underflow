@@ -5,6 +5,15 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.1.6 — 2026-10-11
+
+- Works without the internet: when no Agile prices are known (Octopus unreachable long
+  enough for the cached rates to run out) the planner holds `planner.no_rates_flow`
+  (default: baseline) and **still applies the comfort band**. Before, it returned the
+  baseline ahead of the comfort checks, so a cold house got no boost while prices were
+  missing. The step test never used prices; alerts already also go to an HA persistent
+  notification, so they show on the LAN when push can't get out.
+
 ## 0.1.5 — 2026-10-11
 
 - Room targets adjustable from Home Assistant: `targets:` binds the comfort band

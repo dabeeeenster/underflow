@@ -93,7 +93,9 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
                     parts.append(f"{_fmt_t(w['start'], now)} for {_dur(w['start'], w['end'])} ({pr})")
             lines.append("Cheap windows: " + "; ".join(parts) + ".")
     elif not slots:
-        lines.append("No Agile rates are available yet, so the plan falls back to the heating curve.")
+        held = getattr(cfg, "no_rates_flow", None)
+        held_txt = f"holds a neutral {held:g} °C minimum flow" if held is not None else "falls back to the heating curve"
+        lines.append(f"No Agile prices are available (Octopus unreachable?), so the plan {held_txt}; the comfort band still applies.")
 
     # --- the plan
     sp = plan.get("setpoint_now"); reason = plan.get("reason", "")

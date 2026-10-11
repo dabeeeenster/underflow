@@ -63,7 +63,7 @@ except Exception as exc:  # pragma: no cover
 
 # Bump on every release (see README, "Releases") and add a CHANGELOG.md entry. Published
 # on the status sensor so the dashboard shows which build is actually running.
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 
 class Underflow(hass.Hass):

@@ -29,3 +29,17 @@ p4 = plan(rates, now, 20.0, cfg)
 assert p4["setpoint_now"] == cfg.boost and "comfort min" in p4["reason"], p4
 assert plan([], now, 21.0, cfg)["setpoint_now"] == cfg.baseline
 print("planner OK:", p["cheap_slots"], "cheap of", p["horizon_slots"], "slots; threshold £%.3f" % p["threshold"])
+
+# --- offline: no rates at all (Octopus unreachable, cache run out) --------------
+import datetime as _dt
+_now = _dt.datetime(2026, 10, 12, 3, 0, tzinfo=_dt.timezone.utc)
+off = PlannerConfig(comfort_min=20.0, comfort_max=22.5, no_rates_flow=26.0)
+r = plan([], _now, 21.0, off)
+assert r["setpoint_now"] == 26.0 and not r["urgent"] and r["reason"] == "no rates available", r
+r = plan([], _now, 19.6, off)                       # cold house: comfort floor still boosts
+assert r["setpoint_now"] == off.boost and r["urgent"], r
+r = plan([], _now, 22.8, off)                       # warm house: comfort top still eases off
+assert r["setpoint_now"] == off.baseline and r["urgent"], r
+r = plan([], _now, None, PlannerConfig())           # no no_rates_flow: baseline, as before
+assert r["setpoint_now"] == PlannerConfig().baseline, r
+print("planner offline OK: neutral flow held, comfort band still applies without prices")
