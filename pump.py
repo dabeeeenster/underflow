@@ -473,6 +473,9 @@ class Pump:
             if step.capped and not persist.same_block(self._cap_block, step.block):
                 self.log(f"step test ceiling: {step.reason}")
                 self._cap_block = k
+            elif not step.capped and persist.same_block(self._cap_block, step.block):
+                self.log(f"step test ceiling: room back under, block resumes: {step.reason}")
+                self._cap_block = None
         if step.active:
             if not prev.active or (prev.block and step.block and prev.block.index != step.block.index):
                 self.log(f"step test: {step.reason}")

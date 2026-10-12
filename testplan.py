@@ -15,13 +15,17 @@ Block lengths are deliberately mixed (2-6 h) so the fit can separate the fast ro
 response from the slow slab, and price is ignored (Ben, 10 Oct 2026: he would rather
 pay for better data).
 
-Two guards, each latched for the rest of its block once tripped:
+Two guards:
   * floor   — an "off" block runs for hours, so if the coldest room falls to `floor`
-              the block is abandoned for `guard_flow`.
+              the block is abandoned for `guard_flow`, latched for the rest of the block.
   * ceiling — for the tests the Tados are opened to 25 °C so they don't cut heat blocks
               short (a satisfied Tado stops calling and the pump stops, which censors
-              the step). Instead, if the warmest room reaches `ceiling` a heat block is
-              ended early with the zone off.
+              the step). Instead, while the warmest room is at `ceiling` a heat block is
+              paused with the zone off. The pause holds until the room has fallen
+              `ceiling_hysteresis` below the ceiling, then the block resumes. (Until
+              0.3.1 it latched for the whole block: on 11 Oct 2026 sun and a hot-water run
+              had Upstairs over the ceiling at 16:00, and two heat blocks, 8 h, never ran
+              although the room was back under it by 18:40.)
 
 Pure: no HA, no sockets.
 """
@@ -40,7 +44,8 @@ class TestConfig:
     blocks: tuple = field(default_factory=tuple)   # ((hours, level), ...); level a °C or "off"
     floor: float = 19.0                       # coldest room at/below this ends an off block early
     guard_flow: float = 25.0                  # min flow used while the guard holds
-    ceiling: float | None = None              # warmest room at/above this ends a heat block early
+    ceiling: float | None = None              # warmest room at/above this pauses a heat block
+    ceiling_hysteresis: float = 0.5           # ...until it is this far below the ceiling again
 
     @classmethod
     def from_args(cls, args: dict | None) -> "TestConfig":
@@ -99,7 +104,7 @@ class Step:
     reason: str = ""
     block: Block | None = None
     guarded: bool = False          # floor guard holding (off block abandoned)
-    capped: bool = False           # ceiling guard holding (heat block ended)
+    capped: bool = False           # ceiling guard holding (heat block paused)
 
 
 def test_step(cfg: TestConfig, now: dt.datetime, coldest: float | None,
@@ -121,8 +126,15 @@ def test_step(cfg: TestConfig, now: dt.datetime, coldest: float | None,
         # Leave the min-flow register at baseline so nothing high is waiting when the
         # zone comes back on.
         return Step(True, baseline, "off", f"{tag}: heating off", b)
-    if cfg.ceiling is not None and (cap_latched or (warmest is not None and warmest >= cfg.ceiling)):
-        room = "" if warmest is None else f" (warmest room {warmest:.1f} °C)"
-        return Step(True, baseline, "off",
-                    f"{tag}: heat block ended at the {cfg.ceiling:g} °C ceiling{room}", b, capped=True)
+    if cfg.ceiling is not None:
+        hot = warmest is not None and warmest >= cfg.ceiling
+        # Already paused: stay paused until the room is clearly back under, so a room
+        # hovering at the ceiling doesn't flip the zone every tick. No reading = stay.
+        cooling = cap_latched and (warmest is None or warmest > cfg.ceiling - cfg.ceiling_hysteresis)
+        if hot or cooling:
+            room = "" if warmest is None else f" (warmest room {warmest:.1f} °C)"
+            resume = cfg.ceiling - cfg.ceiling_hysteresis
+            return Step(True, baseline, "off",
+                        f"{tag}: heat paused at the {cfg.ceiling:g} °C ceiling{room}, "
+                        f"resumes below {resume:g} °C", b, capped=True)
     return Step(True, float(b.level), "day", f"{tag}: min flow {b.level:g} °C", b)

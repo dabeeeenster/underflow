@@ -67,8 +67,20 @@ s = test_step(cc, h(1), coldest=21, baseline=20, warmest=23.4)
 assert s.zone == "day" and s.min_flow == 38 and not s.capped, s
 s = test_step(cc, h(1), coldest=21, baseline=20, warmest=23.5)
 assert s.capped and s.zone == "off" and s.min_flow == 20, s
-s = test_step(cc, h(2), coldest=21, baseline=20, warmest=22.9, cap_latched=True)
-assert s.capped and s.zone == "off", s
+s = test_step(cc, h(2), coldest=21, baseline=20, warmest=23.2, cap_latched=True)  # cooling, not under yet
+assert s.capped and s.zone == "off" and "resumes below 23" in s.reason, s
+s = test_step(cc, h(2), coldest=21, baseline=20, warmest=None, cap_latched=True)   # no reading: stay paused
+assert s.capped, s
+s = test_step(cc, h(2), coldest=21, baseline=20, warmest=23.0, cap_latched=True)  # back under: block resumes
+assert not s.capped and s.zone == "day" and s.min_flow == 38, s
+s = test_step(cc, h(2), coldest=21, baseline=20, warmest=23.2)                    # not latched: below ceiling heats
+assert not s.capped and s.min_flow == 38, s
+# 11 Oct 2026: warmest 24.4 at the block's start, under 23.5 by 18:40 -> must not lose the block.
+cc2 = TestConfig.from_args({"enabled": True, "start": cfg.start, "blocks": [[3, 38]], "ceiling": 23.5,
+                            "ceiling_hysteresis": 0.3})
+assert test_step(cc2, h(0.1), coldest=21, baseline=20, warmest=24.4).capped
+assert test_step(cc2, h(1), coldest=21, baseline=20, warmest=23.3, cap_latched=True).capped
+assert not test_step(cc2, h(1.5), coldest=21, baseline=20, warmest=23.1, cap_latched=True).capped
 s = test_step(cc, h(4), coldest=21, baseline=20, warmest=24.0)     # off block: ceiling irrelevant
 assert s.zone == "off" and not s.capped, s
 assert not test_step(cfg, h(4), coldest=21, baseline=20, warmest=30).capped   # no ceiling configured

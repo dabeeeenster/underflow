@@ -205,5 +205,20 @@ assert len(gets) == 1, gets                     # 179's model planner
 a.forecasts("weather.met_office_wood_green", two["pumps"]["179"]["model"]["forecast"]["solcast"])
 assert len([s for s, _ in a.calls if s == "weather/get_forecasts"]) == 1      # memoised within the tick
 
+# --- step-test ceiling pauses a heat block, then lets it resume (0.3.1) ------------------
+import testplan as TP
+a = app(two, states)
+p = a.pumps["179"]
+p.test_cfg = TP.TestConfig.from_args({"enabled": True, "start": (NOW - dt.timedelta(hours=1)).isoformat(),
+                                      "blocks": [[3, 38]], "ceiling": 23.5})
+p.entities["warmest_room"] = "sensor.179_warmest_room"
+for warm, capped, zone in (("24.4", True, "off"), ("23.2", True, "off"), ("22.9", False, "day"), ("23.4", False, "day")):
+    a.states["sensor.179_warmest_room"] = warm
+    p._update_step({"room_temp_mean": 21.0}, NOW)
+    assert p.step.capped is capped and p.step.zone == zone, (warm, p.step)
+    assert (p._cap_block is not None) is capped, (warm, p._cap_block)
+assert p.step.min_flow == 38
+assert any("block resumes" in m for _, m in a.logs), a.logs[-5:]
+
 print("ok: single-pump config unchanged, two pumps built and isolated, forbidden registers refused, "
       "a failing pump never stops the other, sliders routed, comfort on the coldest available room")

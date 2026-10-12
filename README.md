@@ -100,7 +100,7 @@ Tests are standalone scripts: `uv run tests/<name>.py` (`test_model.py` also nee
 | `test_forecast_mpc.py` | Forecast parsing and offline fallback; model planner keeps the room above the floor, banks heat in cheap slots, heats less with sun, nothing for a warm house, deterministic; shadow filter and plan output |
 | `test_persist.py` | Saved state round-trips; a tripped step-test guard stays tripped across a restart; stale, corrupt or foreign state files are ignored |
 | `test_targets.py` | HA slider values override the comfort band and test guards; out-of-range, unparsable or upside-down values fall back to apps.yaml |
-| `test_testplan.py` | Step-test blocks start and end on schedule, "off" asks for the zone off, floor and ceiling guards trip and latch; the CSV log keeps one header per file |
+| `test_testplan.py` | Step-test blocks start and end on schedule, "off" asks for the zone off, the floor guard trips and latches, the ceiling pauses a heat block and lets it resume 0.5 K under; the CSV log keeps one header per file |
 | `test_demand.py` | Mirror held through a dropout, dropped when stale; caps and comfort band apply |
 | `test_shared.py` | Deadband, one step per tick, floor and cap, this half's rooms override the shared sensor |
 | `test_probe.py` | A steady value stays alive; blips are debounced; a missing device is found |

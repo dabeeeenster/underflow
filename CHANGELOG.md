@@ -5,6 +5,17 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.3.1 — 2026-10-12
+
+- Step test: the ceiling guard no longer latches for the rest of a heat block. While the
+  warmest room is at `ceiling` the block is paused (zone off, min flow at baseline); once
+  the room is `ceiling_hysteresis` (default 0.5 K) under the ceiling the block resumes at
+  its level. With no room reading it stays paused. On 11 Oct 2026 the old latch cost two
+  whole heat blocks (32 and 38 °C, 16:00-24:00): sun plus a hot-water run had Upstairs
+  over 23.5 °C at the start of each, and the room was back under by 18:40. The reason
+  reads "heat paused at the 23.5 °C ceiling (warmest room 24.4 °C), resumes below 23 °C",
+  and the log says when a block resumes.
+
 ## 0.3.0 — 2026-10-12
 
 One app, several pumps. Prepares underflow to drive 177 (Havenwise was stopped on 12 Oct
