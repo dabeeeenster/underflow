@@ -5,6 +5,43 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.3.0 — unreleased
+
+One app, several pumps. Prepares underflow to drive 177 (Havenwise was stopped on 12 Oct
+2026) alongside 179, as one app rather than a second instance.
+
+- `pump.py`: everything per-pump (decide, reconcile, step test, zone, shadows, model
+  planner, data log, saved state, published sensors) moved out of `underflow.py` into a
+  `Pump` class with no AppDaemon import. `underflow.py` is now the site: clocks, Agile
+  prices and forecasts fetched once per tick, liveness probes, alerts.
+- `pumps:` in apps.yaml: one entry per pump. A pump inherits `dry_run`, `min_dwell_minutes`,
+  `deadband`, `reconcile`, `entities` and `datalog` from the top level (dicts merge); nothing
+  else. With no `pumps:` key the whole file is one pump and every published entity,
+  friendly name, CSV column and alert id is as before (checked against 0.2.2 on the live
+  179 config).
+- Each pump runs inside its own try/except: one that raises is logged and never stops the
+  other; after 6 failed ticks in a row there is an alert. A pump that can't start is left
+  out, its status sensor set to `refused`, and an alert says why.
+- `forbid_registers` (globs): a pump refuses to start if its `ebusd.register`, declared
+  `write_register` or zone matches. On 177, circuit 1 / zone 1 is the cooling circuit.
+- `entities.comfort_rooms`: the comfort band judged on the coldest of a list of rooms,
+  worked out in the app and skipping unavailable ones (instead of an HA template sensor).
+  The step-test ceiling uses the warmest of them if no `warmest_room` is given.
+- `zone.mode_on` / `zone.mode_off`: the zone select's on and off values (default
+  `day`/`off`).
+- A slider change re-decides its own pump only.
+- Names with a pump: friendly names, alert titles and notification ids include it
+  (`underflow 177 ...`, `underflow_177_hc2minflowtempdesired`); log lines are prefixed
+  `[177]`. Default `status_entity` is `sensor.underflow_<name>`, default CSV prefix the name.
+- `entities.outside_sensors: {name: entity}` replaces `outside_179` / `outside_177` (still
+  accepted), and `entities.mirror_source` replaces `mirror_177` (still accepted). Missing
+  optional entities no longer raise.
+- Renamed on the shadow sensors: `room_temp_179` → `room_temp`, `value_177` →
+  `source_value`; the copy shadow is now "copy the other half".
+- `examples/two-pumps.yaml`: the live 179 config under `pumps:` plus 177 in dry run (price
+  planner only, Hc2, `forbid_registers: [Hc1*, Z1*]`, comfort on Kitchen/Upstairs/Tanya).
+- `tests/test_pumps.py`.
+
 ## 0.2.2 — 2026-10-11
 
 - A write already in flight (< 90 s, same value) is not repeated. The decide tick and the

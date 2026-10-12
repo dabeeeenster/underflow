@@ -1,4 +1,5 @@
 # Copy to /addon_configs/a0d7b954_appdaemon/apps/apps.yaml and fill in your entity ids.
+# One pump. For two or more driven by one app, see examples/two-pumps.yaml.
 underflow:
   module: underflow
   class: Underflow
@@ -25,7 +26,7 @@ underflow:
   entities:
     weather: weather.met_office_home          # any weather entity with a `temperature` attribute
     outside_179: sensor.ebusd_outsidetemp      # the heat pump's own outside sensor (for comparison)
-    outside_177: sensor.other_outsidetemp      # optional second outside sensor; reuse the first if none
+    outside_177: sensor.other_outsidetemp      # optional second one (0.3.0: or outside_sensors: {name: entity})
     room_mean: sensor.room_temperature_mean    # e.g. a min_max helper over your room stats
     flow_temp: sensor.ebusd_hc1flowtemp
     return_temp: sensor.ebusd_returntemp

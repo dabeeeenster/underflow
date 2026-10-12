@@ -1,0 +1,202 @@
+# underflow 0.3.0: one app, two heat pumps (the two halves of one house, 177 and 179).
+# A draft of the site's apps.yaml, not deployed. Site-wide keys sit at the top; each
+# entry under `pumps:` is one heat pump. A pump inherits dry_run, min_dwell_minutes,
+# deadband, reconcile, entities and datalog from the top (dicts merge, its own keys win);
+# everything else belongs to one pump and never leaks to the other.
+#
+# 179 below is the live config of 10-14 Oct 2026 moved under `pumps:` (step test schedule
+# left out for brevity: paste the live `test:` block back in unchanged). Its entity ids
+# and CSV columns are unchanged, so its dashboard and data log carry on as they are.
+underflow:
+  module: underflow
+  class: Underflow
+  dry_run: true            # the default for any pump that doesn't say
+  interval_minutes: 30     # decide (site clock)
+  reconcile_minutes: 5     # reconcile (site clock)
+  min_dwell_minutes: 30
+  deadband: 0.5
+  alert_service: notify/mobile_app_bens_iphone_13_pro_max
+  reconcile:
+    tolerance: 0.25
+    settle_seconds: 60
+    alert_after_seconds: 1800
+  probes:                  # site-level: one sensor.underflow_bus_probe for both buses
+    entity: sensor.underflow_bus_probe
+    dead_after: 3
+    timeout: 3
+    stale_after: 300
+    down_every_cycles: 3
+    targets:
+      - {name: 179_ctlv2, host: 192.168.1.9, port: 8890, circuit: ctlv2, register: Currenterror}
+      - {name: 179_hmu,   host: 192.168.1.9, port: 8890, circuit: hmu,   register: Status01}
+      - {name: 177_ctlv2, host: 192.168.1.9, port: 8888, circuit: ctlv2, register: Currenterror}
+      - {name: 177_hmu,   host: 192.168.1.9, port: 8888, circuit: hmu,   register: Status01}
+  entities:                # shared by both pumps
+    weather: weather.met_office_wood_green
+    outside_sensors:       # logged as outside_temp_<name>_sensor, in this order
+      "179": sensor.heating_ebusd179_broadcast_outsidetemp
+      "177": sensor.heating_ebusd177_broadcast_outsidetemp
+  datalog:
+    dir: /config/underflow_log
+    averaged:
+      pv_w: sensor.solar_panel_production_w
+
+  pumps:
+    "179":
+      dry_run: false
+      state_file: /config/underflow_state_179.json
+      status_entity: sensor.underflow_179
+      plan_entity: sensor.underflow_179_planned_min_flow
+      friendly_name: underflow 179 heat pump controller
+      room_label: the coldest room
+      write_script: script/set_179_min_flow_temp
+      write_register: Hc1MinFlowTempDesired
+      ebusd:
+        host: 192.168.1.9
+        port: 8890
+        circuit: ctlv2
+        register: Hc1MinFlowTempDesired
+        timeout: 4
+        max_age: 600
+        signal_entity: binary_sensor.heating_ebusd179_global_signal
+      planner:
+        baseline: 20
+        boost: 32
+        cheap_fraction: 0.33
+        horizon_hours: 24
+        comfort_min: 20.0
+        comfort_max: 22.5
+        no_rates_flow: 26
+      targets:
+        comfort_min: input_number.underflow_179_comfort_floor
+        comfort_max: input_number.underflow_179_comfort_top
+        test_floor: input_number.underflow_179_test_floor
+        test_ceiling: input_number.underflow_179_test_ceiling
+      zone:
+        entity: select.heating_ebusd179_ctlv2_z1opmode
+        script: script.set_179_zone_mode
+        mode_on: day           # what zone 1's select calls on and off (the defaults)
+        mode_off: "off"        # quoted: bare off is YAML for false (accepted either way)
+      model:
+        provisional: true
+        top: 23.5
+        allow_off: true
+        horizon_hours: 24
+        max_forecast_age_h: 6
+        forecast:
+          weather: weather.met_office_wood_green
+          solcast: [sensor.solcast_pv_forecast_forecast_today, sensor.solcast_pv_forecast_forecast_tomorrow]
+          heat_column: heat_out_kw_bus
+        params: {c_slab: 15.01, c_room: 1.078, r_sr: 1.141, r_ro: 3.63, g_room: 1.749, g_slab: 0.0}
+        mpc:
+          levels: ["off", 20, 25, 32, 38, 42]
+          k_emit: 0.27
+          q_max: 6.86
+          cop_eta: 0.391
+          spread: 1.0
+          curve: 0.2
+          zone_setpoint: 23
+      datalog:
+        prefix: "179"
+        columns:
+          living: sensor.tado_smart_thermostat_ru1870089728_current_temperature
+          bedrooms: sensor.tado_smart_thermostat_ru3351793152_current_temperature
+          upstairs: sensor.tado_smart_thermostat_ru3930213888_current_temperature
+          living_call: climate.tado_smart_thermostat_ru1870089728|hvac_action
+          bedrooms_call: climate.tado_smart_thermostat_ru3351793152|hvac_action
+          upstairs_call: climate.tado_smart_thermostat_ru3930213888|hvac_action
+          warmest: sensor.179_warmest_room
+          tado_mean: sensor.179_room_temperature_tado_mean
+          solcast_next_hour_wh: sensor.solcast_pv_forecast_forecast_next_hour
+          rooms_177_shelly: sensor.shellyhtg3_e4b323312f80_temperature
+          flow_177: sensor.heating_ebusd177_hmu_flowtemp
+          status_177: sensor.heating_ebusd177_hmu_rundatastatuscode
+          minflow_177: sensor.heating_ebusd177_ctlv2_hc2minflowtempdesired
+          kitchen_177: sensor.tado_smart_thermostat_ru2614901760_current_temperature
+          lotte_177: sensor.tado_smart_thermostat_ru1602442752_current_temperature
+          upstairs_177: sensor.tado_smart_thermostat_ru1844530688_current_temperature
+          tanya_177: sensor.tado_smart_thermostat_ru3769716224_current_temperature
+        bus:
+          heat_out_kw_bus: hmu CurrentYieldPower
+          power_in_kw_bus: hmu CurrentConsumedPower
+          flow_hmu_bus: hmu FlowTemp
+      entities:
+        room_mean: sensor.179_coldest_room
+        warmest_room: sensor.179_warmest_room
+        flow_temp: sensor.heating_ebusd179_hmu_flowtemp
+        flow_temp_circuit: sensor.heating_ebusd179_ctlv2_hc1flowtemp
+        return_temp: sensor.heating_ebusd179_hmu_status01_temp_1
+        power_in: sensor.heating_ebusd179_hmu_currentconsumedpower
+        power_out: sensor.heating_ebusd179_hmu_currentyieldpower
+        heat_curve: number.heating_ebusd179_ctlv2_hc1heatcurve
+        min_flow: number.heating_ebusd179_ctlv2_hc1minflowtempdesired
+        max_flow: number.heating_ebusd179_ctlv2_hc1maxflowtempdesired
+        agile_rate: sensor.octopus_energy_electricity_24j0117056_1013073570995_current_rate
+        agile_rates_today: event.octopus_energy_electricity_24j0117056_1013073570995_current_day_rates
+        agile_rates_tomorrow: event.octopus_energy_electricity_24j0117056_1013073570995_next_day_rates
+        pump_status: sensor.heating_ebusd179_hmu_rundatastatuscode
+
+    # 177: Havenwise stopped 12 Oct 2026. Price planner only, dry run first. Its heating is
+    # circuit 2 / zone 2; circuit 1 / zone 1 is the COOLING circuit, so this pump refuses
+    # to start if anything here points at Hc1 or Z1.
+    "177":
+      dry_run: true
+      forbid_registers: ["Hc1*", "Z1*"]
+      state_file: /config/underflow_state_177.json
+      status_entity: sensor.underflow_177
+      plan_entity: sensor.underflow_177_planned_min_flow
+      friendly_name: underflow 177 heat pump controller
+      room_label: the coldest room (Kitchen, Upstairs, Tanya)
+      write_script: script/set_177_min_flow_temp      # to be created: Hc2, 20-45 °C, read-back, quiet
+      write_register: Hc2MinFlowTempDesired
+      ebusd:
+        host: 192.168.1.9
+        port: 8888
+        circuit: ctlv2
+        register: Hc2MinFlowTempDesired
+        timeout: 4
+        max_age: 600
+        signal_entity: binary_sensor.heating_ebusd177_global_signal
+      planner:
+        baseline: 20          # curve only (177's Hc2 curve is 0.6 since 12 Oct 2026)
+        boost: 32
+        cheap_fraction: 0.33
+        horizon_hours: 24
+        comfort_min: 20.0     # on the coldest of entities.comfort_rooms
+        comfort_max: 22.5
+        no_rates_flow: 26
+      # No step test and no zone control on 177.
+      datalog:
+        prefix: "177"
+        columns:
+          kitchen: sensor.tado_smart_thermostat_ru2614901760_current_temperature
+          upstairs: sensor.tado_smart_thermostat_ru1844530688_current_temperature
+          tanya: sensor.tado_smart_thermostat_ru3769716224_current_temperature
+          lotte: sensor.tado_smart_thermostat_ru1602442752_current_temperature     # logged only
+          shelly: sensor.shellyhtg3_e4b323312f80_temperature
+          heat_curve_hc2: number.heating_ebusd177_ctlv2_hc2heatcurve
+          z2_mode: select.heating_ebusd177_ctlv2_z2opmode
+        bus:
+          heat_out_kw_bus: hmu CurrentYieldPower
+          power_in_kw_bus: hmu CurrentConsumedPower
+          flow_hmu_bus: hmu FlowTemp
+      entities:
+        # Comfort is judged on the coldest of these, worked out in the app, skipping any
+        # that are unavailable. Lotte stays out: it averaged 19.6 °C and its sensor was
+        # unavailable a third of 10-12 Oct 2026, so it would drive high flows on bad data.
+        comfort_rooms:
+          - sensor.tado_smart_thermostat_ru2614901760_current_temperature   # Kitchen
+          - sensor.tado_smart_thermostat_ru1844530688_current_temperature   # Upstairs
+          - sensor.tado_smart_thermostat_ru3769716224_current_temperature   # Tanya
+        flow_temp: sensor.heating_ebusd177_hmu_flowtemp
+        flow_temp_circuit: sensor.heating_ebusd177_ctlv2_hc2flowtemp
+        return_temp: sensor.heating_ebusd177_hmu_status01_temp_1
+        power_in: sensor.heating_ebusd177_hmu_currentconsumedpower
+        power_out: sensor.heating_ebusd177_hmu_currentyieldpower
+        heat_curve: number.heating_ebusd177_ctlv2_hc2heatcurve
+        min_flow: number.heating_ebusd177_ctlv2_hc2minflowtempdesired
+        max_flow: number.heating_ebusd177_ctlv2_hc2maxflowtempdesired
+        agile_rate: sensor.octopus_energy_electricity_23e5122790_1013073571456_current_rate
+        agile_rates_today: event.octopus_energy_electricity_23e5122790_1013073571456_current_day_rates
+        agile_rates_tomorrow: event.octopus_energy_electricity_23e5122790_1013073571456_next_day_rates
+        pump_status: sensor.heating_ebusd177_hmu_rundatastatuscode

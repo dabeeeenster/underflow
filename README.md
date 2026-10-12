@@ -69,7 +69,8 @@ still the comfort sensors.
 
 | File | Purpose |
 |---|---|
-| `underflow.py` | The AppDaemon app: decide, reconcile and observe loops; publishes sensors; calls the write script when the bus disagrees |
+| `underflow.py` | The AppDaemon app, i.e. the site: the decide and reconcile clocks, Agile prices and forecasts (fetched once per tick), liveness probes, alerts; runs each pump in turn |
+| `pump.py` | One heat pump: decide, reconcile and observe; publishes its sensors; calls its write script when the bus disagrees. No AppDaemon import |
 | `planner.py` | Stage 1 rules. Pure functions, no HA |
 | `ebusd.py` | Client for ebusd's TCP command port (see below) |
 | `reconcile.py` | Given a target, a fresh reading and the link state, decide whether to write. Pure |
@@ -82,7 +83,8 @@ still the comfort sensors.
 | `tools/ha_dashboard.py` | Get or save a storage-mode dashboard over the websocket |
 | `tools/fetch_stats.py` | Export HA long-term statistics to CSV (needs `HASS_URL`, `HASS_TOKEN`) |
 | `tools/fit_from_csv.py` | Fit the house model to that CSV; an offline smoke test |
-| `apps.example.yaml` | Example AppDaemon config |
+| `apps.example.yaml` | Example AppDaemon config, one pump |
+| `examples/two-pumps.yaml` | Example config for one app driving two pumps (`pumps:`) |
 | `docs/set_min_flow_temp.example.yaml` | Example write script with bounds and read-back |
 
 Tests are standalone scripts: `uv run tests/<name>.py` (`test_model.py` also needs
@@ -102,6 +104,7 @@ Tests are standalone scripts: `uv run tests/<name>.py` (`test_model.py` also nee
 | `test_demand.py` | Mirror held through a dropout, dropped when stale; caps and comfort band apply |
 | `test_shared.py` | Deadband, one step per tick, floor and cap, this half's rooms override the shared sensor |
 | `test_probe.py` | A steady value stays alive; blips are debounced; a missing device is found |
+| `test_pumps.py` | A one-pump apps.yaml works as before; two pumps get their own config plus the inherited site keys, nothing leaking; a pump pointed at a forbidden register is refused while the other starts; a pump that raises never stops the other; a slider re-decides its own pump only; comfort on the coldest available room |
 
 ### Synthetic test results
 
@@ -237,6 +240,29 @@ Install from a [release](https://github.com/dabeeeenster/underflow/releases) rat
 `main`, so you know which version is running: the status sensor's `version` attribute
 says which build AppDaemon actually loaded.
 
+### Two or more pumps
+
+One app drives every pump; don't run a second instance. Put each pump's config under
+`pumps:` (see `examples/two-pumps.yaml`). A pump inherits `dry_run`, `min_dwell_minutes`,
+`deadband`, `reconcile`, `entities` and `datalog` from the top level, with dicts merged and
+its own keys winning. Nothing else is inherited, so a step test or a register can't leak
+to the other pump. Clocks, probes and `alert_service` stay at the top level. Each pump
+needs its own `status_entity`, `state_file` and `datalog.prefix`. Without `pumps:`, the
+whole file is one pump, as before 0.3.0.
+
+Per pump:
+- `forbid_registers: ["Hc1*", "Z1*"]` refuses to start the pump if its `ebusd.register`,
+  its declared `write_register` or its zone points at a match. Use it where a circuit must
+  never be written, such as a cooling circuit. The refused pump's status sensor reads
+  `refused`, and an alert says why.
+- `entities.comfort_rooms: [...]` judges comfort on the coldest of these rooms, worked out
+  in the app and skipping any that are unavailable. It's an alternative to a
+  `room_mean` sensor. Rooms you only want logged go in `datalog.columns`.
+- `zone.mode_on` / `zone.mode_off` are what the zone select calls on and off (default
+  `day` / `off`).
+- `entities.outside_sensors: {name: entity}` lists outside sensors to log as
+  `outside_temp_<name>_sensor`. The older `outside_179` / `outside_177` keys still work.
+
 If you later add a new block to the app's config in `apps.yaml`, restart the AppDaemon
 add-on. AppDaemon can fail to reload the config (`KeyError` in `deep_compare`) and keep
 running the app with the old settings.
@@ -246,6 +272,8 @@ running the app with the old settings.
 - `dry_run: true` is the default and the only mode in stage 0.
 - underflow never writes a register directly. It calls a script you own, which enforces
   the bounds and reads the value back off the bus.
+- `forbid_registers` stops a pump starting if it is configured to touch a circuit it must
+  never write.
 - Before enabling any control stage, cap `MaxFlowTempDesired` on the heating circuit at
   what your floor can take (45 °C is usual for screed).
 
