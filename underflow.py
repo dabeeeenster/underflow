@@ -34,28 +34,27 @@ Later stages add a fitted two-node (slab + air) RC house model, a Carnot-fractio
 model fitted from the measured power, and a dynamic-programming optimiser that picks the
 minimum flow temperature per half-hour against tariff and weather forecast.
 
+**One app, several pumps (0.3.0).** This class is the site: the clocks, Agile prices,
+forecasts, liveness probes and alerts. Each heat pump is a `pump.Pump` built from an
+entry under `pumps:`, with the site-wide keys in `INHERITED` as its defaults. The clocks
+run every pump in turn, each inside its own try/except, so a pump that raises never stops
+the other. With no `pumps:` key, the whole of apps.yaml is one unnamed pump and every
+published name is what it was before.
+
 All entity ids come from apps.yaml; nothing is hard-coded to a particular house.
 """
-import dataclasses
+import copy
 import datetime as dt
+import traceback
 
 import appdaemon.plugins.hass.hassapi as hass
 
-from planner import PlannerConfig, plan, normalise_rates
-from narrative import describe, summary
+from planner import normalise_rates
 from hasafe import ha_safe
-from ebusd import MAX_CLOCK_SKEW, Ebusd
-from reconcile import ReconcileConfig, RegisterState, decide
-from demand import Held, MirrorConfig, choose, hold
-from shared import SharedConfig, shared_step
+from ebusd import Ebusd
 from probe import ProbeState, ProbeTarget, summarise, update
-from testplan import TestConfig, Step, test_step, current_block
-import persist
-import numpy as np
-import targets
+from pump import Pump, PumpRefused
 import forecast as F
-import shadow as SH
-import datalog
 
 try:
     import numpy as np
@@ -67,65 +66,43 @@ except Exception as exc:  # pragma: no cover
 
 # Bump on every release (see README, "Releases") and add a CHANGELOG.md entry. Published
 # on the status sensor so the dashboard shows which build is actually running.
-__version__ = "0.2.2"
+__version__ = "0.3.0"
+
+# Site-wide keys a pump inherits unless its own entry says otherwise; dicts merge, so
+# a pump adds its own `entities` or `datalog.columns` to the shared ones. Everything else
+# (planner, test, zone, model, ebusd, mirror, targets, state_file, ...) belongs to one pump
+# and is never inherited: a step test or a register must not leak to the other half.
+INHERITED = ("dry_run", "min_dwell_minutes", "deadband", "reconcile", "entities", "datalog")
+
+# A pump that raises this many ticks in a row (5-minute reconcile) gets an alert.
+FAIL_ALERT_TICKS = 6
+
+
+def merge(base: dict, over: dict) -> dict:
+    """`over` on top of `base`, recursing into dicts; lists and scalars replace."""
+    out = copy.deepcopy(base)
+    for k, v in (over or {}).items():
+        out[k] = merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else copy.deepcopy(v)
+    return out
+
+
+def pump_configs(args: dict) -> list[tuple]:
+    """[(name, config)] from apps.yaml. No `pumps:` key = one unnamed pump, the whole file."""
+    pumps = args.get("pumps")
+    if not pumps:
+        return [(args.get("name"), dict(args))]
+    site = {k: args[k] for k in INHERITED if k in args}
+    return [(str(name), merge(site, cfg or {})) for name, cfg in pumps.items()]
 
 
 class Underflow(hass.Hass):
     def initialize(self):
-        self.entities = self.args["entities"]
-        self.status_entity = self.args.get("status_entity", "sensor.underflow")
-        self.dry_run = bool(self.args.get("dry_run", True))
         self.interval = int(self.args.get("interval_minutes", 30))
         self.reconcile_interval = int(self.args.get("reconcile_minutes", 5))
-        self.min_dwell = float(self.args.get("min_dwell_minutes", 30)) * 60
-        self.deadband = float(self.args.get("deadband", 0.5))
-        self._timers = []
-
-        pc = self.args.get("planner", {}) or {}
-        self.planner_cfg = PlannerConfig(**{k: v for k, v in pc.items() if k in PlannerConfig.__dataclass_fields__})
-        self.plan_entity = self.args.get("plan_entity", self.status_entity + "_planned_min_flow")
-        self.narrative_entity = self.args.get("narrative_entity", self.status_entity + "_whats_going_on")
-        self.write_script = self.args.get("write_script")  # e.g. script/set_179_min_flow_temp
         self.alert_service = self.args.get("alert_service")  # e.g. notify/mobile_app_...
-
-        # --- the register we own, and how we verify it
-        eb = self.args.get("ebusd", {}) or {}
-        self.circuit = eb.get("circuit", "ctlv2")
-        self.register = eb.get("register", "Hc1MinFlowTempDesired")
-        self.bus = Ebusd(eb["host"], eb["port"], float(eb.get("timeout", 4.0))) if eb.get("host") else None
-        # Routine verification accepts a cached value of known age; only the read that
-        # confirms a write we just made has to come off the wire. See ebusd.py.
-        self.bus_max_age = float(eb.get("max_age", 600.0))
-        self._force_next_read = False
-        self.signal_entity = eb.get("signal_entity")
-        rc = self.args.get("reconcile", {}) or {}
-        self.reconcile_cfg = ReconcileConfig(**{k: v for k, v in rc.items() if k in ReconcileConfig.__dataclass_fields__},
-                                             dry_run=self.dry_run)
-        self.reg_state = RegisterState()
-
-        # --- the demand source (177's Havenwise decisions, once they exist)
-        mc = dict(self.args.get("mirror", {}) or {})
-        self.mirror_host, self.mirror_port = mc.pop("host", None), mc.pop("port", None)
-        self.mirror_circuit = mc.pop("circuit", "ctlv2")
-        self.mirror_register = mc.pop("register", "Hc2MinFlowTempDesired")
-        mc.pop("timeout", None)
-        self.mirror_cfg = MirrorConfig(**{k: v for k, v in mc.items() if k in MirrorConfig.__dataclass_fields__})
-        self.mirror_bus = (Ebusd(self.mirror_host, self.mirror_port, float(eb.get("timeout", 4.0)))
-                           if self.mirror_cfg.enabled and self.mirror_host else None)
-        self.held = Held()
-
-        # --- shadows: alternative demand sources computed every decide tick and
-        # published as their own sensors, never written. A season-long record of what
-        # each would have done, to compare against what 179 actually did.
-        sc = dict(self.args.get("shared", {}) or {})
-        self.shared_sensor = sc.pop("sensor", None)
-        self.shared_entity = sc.pop("entity", self.status_entity + "_shadow_shared")
-        self.shared_cfg = SharedConfig(**{k: v for k, v in sc.items() if k in SharedConfig.__dataclass_fields__})
-        self.shared_value = self._recover(self.shared_entity) if self.shared_sensor else None
-        # The mirror shadow reads 177's register from HA's ebusd cache rather than the
-        # bus: a shadow is not worth a transaction on 177's poor link.
-        self.mirror_shadow_source = self.entities.get("mirror_177")
-        self.mirror_shadow_entity = self.status_entity + "_shadow_mirror"
+        self._timers = []
+        self._memo = {}
+        self._forecast_err = None
 
         # --- liveness probes: is each device still answering on its bus?
         # Not a controller concern, but this app is the only thing with an ebusd client
@@ -150,82 +127,35 @@ class Underflow(hass.Hass):
                                            Ebusd(t.host, t.port, self.probe_timeout))
         self.probe_states = {t.name: ProbeState() for t in self.probes}
 
-        # --- stage-2 step tests: a fixed schedule of min-flow / zone-off blocks that
-        # replaces the planner while it runs. See testplan.py.
-        self.test_cfg = TestConfig.from_args(self.args.get("test"))
-        zc = self.args.get("zone", {}) or {}
-        self.zone_entity = zc.get("entity")          # select.heating_ebusd179_ctlv2_z1opmode
-        self.zone_script = zc.get("script")          # script.set_179_zone_mode
-        self.zone_desired = None                     # None = leave the zone alone
-        self._zone_last_write = None
-        self.step = Step(False)
-        # Room targets adjustable from HA (targets.py): {key: input_number entity}. The
-        # apps.yaml values above are the fallback.
-        self.target_helpers = dict(self.args.get("targets", {}) or {})
-        self._base_planner_cfg, self._base_test_cfg = self.planner_cfg, self.test_cfg
-        self._targets_seen = None
-        for ent in self.target_helpers.values():
-            self.listen_state(self._on_target_change, ent)
-        self._guard_block = None
-        self._cap_block = None
-        self._test_was_active = False
-
-        # --- 5-minute CSV for fitting the models offline. See datalog.py.
-        lc = self.args.get("datalog", {}) or {}   # not "log": AppDaemon reserves it
-        self.log_dir = lc.get("dir")
-        self.log_prefix = lc.get("prefix", "underflow")
-        self.log_columns = dict(lc.get("columns", {}) or {})
-        # Time-weighted means between rows (e.g. PV), fed by state changes.
-        self.log_averaged = dict(lc.get("averaged", {}) or {})
-        self._averages = {}
-        for name, ent in self.log_averaged.items():
-            avg = datalog.TimeAverage()
-            avg.update(self.get_state(ent), self.datetime(aware=True))
-            self._averages[name] = avg
-            self.listen_state(self._on_averaged, ent, name=name)
-        # Registers read straight off the bus for each row ("circuit Register"). ebusd
-        # polls the HMU power and flow registers only every ~10 min, so HA's entities
-        # for them are stale between polls; `read -m 60` costs at most one transaction.
-        self.log_bus = dict(lc.get("bus", {}) or {})
-        self._last_log = None
-
-        # --- stage-2 model planner, shadow only (shadow.py): plans and publishes, never
-        # writes. Needs fitted parameters under `model.params`; without them it says so.
-        mc = self.args.get("model", {}) or {}
-        self.model_entity = mc.get("entity", self.status_entity + "_model_plan")
-        self.model_forecast = dict(mc.get("forecast", {}) or {})
-        try:
-            scfg = SH.ShadowConfig.from_args(mc)
-        except Exception as exc:
-            scfg = None
-            self.log(f"model config rejected: {exc!r}", level="WARNING")
-        self.shadow = SH.Shadow(scfg, float(mc.get("max_forecast_age_h", 6))) if scfg else None
-        self._last_row = None
-        self._last_shadow = None
-        self._write_at = None
-        self._forecast_err = None
-
-        self.desired = self._recover_desired()
-        self.desired_since = self.datetime(aware=True) if self.desired is not None else None
-        # Everything above that matters across a restart is overwritten from the state
-        # file if there is a recent one (persist.py). Ben restarts HA for updates.
-        self.state_file = self.args.get("state_file")
-        self.restored = self._restore_state()
-        self.source, self.source_reason = "none", "starting up"
-        self._unknown_codes = set()
-        self._last_decision = None
+        # --- the pumps. One that is misconfigured (or refuses its config) is left out
+        # and said so loudly; the others still start.
+        self.pumps = {}
+        for name, cfg in pump_configs(self.args):
+            try:
+                p = Pump(self, name, cfg, __version__, NUMERIC_OK)
+            except PumpRefused as exc:
+                self._refuse(name, cfg, f"refused to start: {exc}")
+                continue
+            except Exception as exc:
+                self.log(traceback.format_exc(), level="ERROR")
+                self._refuse(name, cfg, f"failed to start: {exc!r}")
+                continue
+            if any(q.status_entity == p.status_entity for q in self.pumps.values()):
+                self._refuse(name, cfg, f"status_entity {p.status_entity} is already another pump's")
+                continue
+            self.pumps[name] = p
+            # A slider moved: re-decide that pump only.
+            for ent in p.target_helpers.values():
+                self.listen_state(self._on_target_change, ent, pump=name)
+            for avg_name, ent in p.log_averaged.items():
+                self.listen_state(self._on_averaged, ent, pump=name, avg=avg_name)
 
         self._schedule(self.on_decide, self.interval)
         self._schedule(self.on_reconcile, self.reconcile_interval)
         self.run_in(self.on_decide, 10)
-        if self.test_cfg.enabled:
-            self.log(f"step test configured: {len(self.test_cfg.blocks)} blocks from "
-                     f"{self.test_cfg.start} to {self.test_cfg.end_at()}; floor {self.test_cfg.floor:g}")
-        self.log(f"initialised v{__version__}; dry_run={self.dry_run}; decide/{self.interval}min "
-                 f"reconcile/{self.reconcile_interval}min; probes={len(self.probes)}; "
-                 f"log={self.log_dir or 'off'}; "
-                 f"recovered desired={self.desired}; "
-                 f"numeric stack: {NUMERIC_OK}")
+        self.log(f"initialised v{__version__}; pumps={[p.name for p in self.pumps.values()]}; "
+                 f"decide/{self.interval}min reconcile/{self.reconcile_interval}min; "
+                 f"probes={len(self.probes)}; numeric stack: {NUMERIC_OK}")
 
     def terminate(self):
         for t in self._timers:
@@ -240,582 +170,122 @@ class Underflow(hass.Hass):
         first = now.replace(second=5, microsecond=0) + dt.timedelta(minutes=offset)
         self._timers.append(self.run_every(callback, first, minutes * 60))
 
-    def _recover_desired(self):
-        """An AppDaemon restart must not forget the target and rewrite blind. The plan
-        sensor already holds it, so read it back."""
-        return self._recover(self.plan_entity)
-
-    def _recover(self, entity_id):
-        try:
-            v = self.get_state(entity_id)
-            return None if v in (None, "unknown", "unavailable", "") else float(v)
-        except (TypeError, ValueError):
-            return None
-
-    def _num(self, entity_id, attribute=None):
-        try:
-            v = self.get_state(entity_id, attribute=attribute)
-            return None if v in (None, "unknown", "unavailable", "") else float(v)
-        except (TypeError, ValueError):
-            return None
-
     def _publish(self, entity_id, state, attributes):
         """set_state with every value run through ha_safe(). See its docstring."""
         self.set_state(entity_id, state=ha_safe(state), attributes=ha_safe(attributes))
 
-    def _signal(self):
-        """(up, seconds it has been continuously up). The one ebusd entity that is
-        genuinely live — it flaps in real time, unlike the registers."""
-        if not self.signal_entity:
-            return True, float("inf")
-        try:
-            state = self.get_state(self.signal_entity)
-            changed = self.get_state(self.signal_entity, attribute="last_changed")
-        except Exception:
-            return False, 0.0
-        if state != "on":
-            return False, 0.0
-        if isinstance(changed, str):
-            changed = dt.datetime.fromisoformat(changed)
-        if not isinstance(changed, dt.datetime):
-            return True, float("inf")
-        if changed.tzinfo is None:
-            changed = changed.replace(tzinfo=self.datetime(aware=True).tzinfo)
-        return True, max(0.0, (self.datetime(aware=True) - changed).total_seconds())
+    def _refuse(self, name, cfg, why):
+        label = f"underflow {name}" if name else "underflow"
+        self.log(f"{label} {why}", level="ERROR")
+        self.alert(f"{label} is not running", why, f"underflow_{name or 'app'}_refused")
+        status = cfg.get("status_entity", f"sensor.underflow_{name}" if name else "sensor.underflow")
+        self._publish(status, "refused", {"friendly_name": cfg.get("friendly_name", label),
+                                          "icon": "mdi:alert", "reason": why, "version": __version__})
 
-    def _mode(self, status):
-        """Classify the HMU run-data status code into idle / dhw / heating / cooling.
+    def alert(self, title, message, notification_id):
+        self.log(f"ALERT: {message}", level="WARNING")
+        self.call_service("persistent_notification/create", title=title, message=message,
+                          notification_id=notification_id)
+        if self.alert_service:
+            self.call_service(self.alert_service, title=title, message=message)
 
-        The codes look like 'standby', 'hwc_compressor_active', and (once the heating
-        season starts) an 'hc'/'heating' equivalent. This matters because a cylinder
-        charge runs the flow to 60-70 C, a completely different operating point from
-        30 C space heating: mixing the two fits the COP model to the wrong regime.
-        Unrecognised codes are logged once and never counted as heating.
-        """
-        s = (status or "").strip().lower()
-        if s in ("", "unknown", "unavailable"):
-            return "unknown"
-        if "standby" in s or s == "off":
-            return "idle"
-        if "hwc" in s or "dhw" in s or "water" in s:
-            return "dhw"
-        if "cool" in s:
-            return "cooling"
-        if "hc" in s or "heat" in s:
-            return "heating"
-        if s not in self._unknown_codes:
-            self._unknown_codes.add(s)
-            self.log(f"unrecognised HMU status code {status!r}; not counted as heating", level="WARNING")
-        return "other"
+    def _memoised(self, key, fetch, ttl=120):
+        """The pumps run one after another inside a tick; share what they both read."""
+        now = self.datetime(aware=True)
+        hit = self._memo.get(key)
+        if hit and (now - hit[0]).total_seconds() < ttl:
+            return hit[1]
+        value = fetch()
+        self._memo[key] = (now, value)
+        return value
 
-    # ---- observe -------------------------------------------------------
-    def _observe(self):
-        e = self.entities
-        obs = {
-            "outside_temp_met_office": self._num(e["weather"], "temperature"),
-            "outside_temp_179_sensor": self._num(e["outside_179"]),
-            "outside_temp_177_sensor": self._num(e["outside_177"]),
-            "room_temp_mean": self._num(e["room_mean"]),
-            "flow_temp": self._num(e["flow_temp"]),
-            "flow_temp_circuit": self._num(e["flow_temp_circuit"]) if e.get("flow_temp_circuit") else None,
-            "return_temp": self._num(e["return_temp"]),
-            "power_in_kw": self._num(e["power_in"]),
-            "power_out_kw": self._num(e["power_out"]),
-            "heat_curve": self._num(e["heat_curve"]),
-            "min_flow_temp": self._num(e["min_flow"]),
-            "max_flow_temp": self._num(e["max_flow"]),
-            "agile_rate_now": self._num(e["agile_rate"]),
-            "pump_status": self.get_state(e["pump_status"]),
-        }
-        obs["mode"] = self._mode(obs["pump_status"])
-        pin, pout = obs["power_in_kw"], obs["power_out_kw"]
-        obs["cop_now"] = round(pout / pin, 2) if pin and pout and pin > 0.2 else None
-        obs["dry_run"] = self.dry_run
-        obs["version"] = __version__
-        obs["numeric_stack"] = NUMERIC_OK
-        obs["last_run"] = self.datetime(aware=True).isoformat(timespec="seconds")
-        return obs
+    # ---- shared inputs ---------------------------------------------------
+    def rates(self, today, tomorrow):
+        def fetch():
+            raw = []
+            for ent in (today, tomorrow):
+                if ent:
+                    r = self.get_state(ent, attribute="rates")
+                    if isinstance(r, list):
+                        raw.extend(r)
+            return normalise_rates(raw)
+        return self._memoised(("rates", today, tomorrow), fetch)
 
-    def _publish_status(self, obs, extra):
-        state = "observing" if self.dry_run else "controlling"
-        self._publish(
-            self.status_entity,
-            state,
-            {"friendly_name": self.args.get("friendly_name", "underflow heat pump controller"),
-             "icon": "mdi:heat-pump", **obs, **extra},
-        )
-        return state
+    def forecasts(self, weather, solcast):
+        """(Met Office hourly temperatures, Solcast PV) for the model planners."""
+        def fetch():
+            met = None
+            if weather:
+                try:
+                    resp = self.call_service("weather/get_forecasts", entity_id=weather, type="hourly",
+                                             return_response=True)
+                    met = F.parse_met(F.find_forecast_list(resp))
+                    if not met:
+                        raise ValueError(f"no hourly forecast in response ({type(resp).__name__})")
+                except Exception as exc:
+                    if repr(exc) != self._forecast_err:
+                        self.log(f"temperature forecast unavailable: {exc!r}", level="WARNING")
+                        self._forecast_err = repr(exc)
+            lists = [self.get_state(e, attribute="detailedForecast") for e in solcast or []]
+            sol = F.parse_solcast(*[l for l in lists if isinstance(l, list)])
+            return met, sol
+        return self._memoised(("forecasts", weather, tuple(solcast or [])), fetch)
 
-    # ---- decide: what should the register be? --------------------------
-    def _apply_targets(self):
-        if not self.target_helpers:
-            return
-        values = {k: self.get_state(ent) for k, ent in self.target_helpers.items()}
-        self.planner_cfg, self.test_cfg, notes = targets.apply(
-            self._base_planner_cfg, self._base_test_cfg, values)
-        seen = (self.planner_cfg.comfort_min, self.planner_cfg.comfort_max,
-                self.test_cfg.floor, self.test_cfg.ceiling, tuple(notes))
-        if seen != self._targets_seen:
-            self.log(f"targets: comfort {seen[0]:g}-{seen[1]:g}, test floor {seen[2]:g} "
-                     f"ceiling {seen[3]}" + (f"; {'; '.join(notes)}" if notes else ""),
-                     level="WARNING" if notes else "INFO")
-            self._targets_seen = seen
-
-    def _on_target_change(self, entity, attribute, old, new, kwargs):
-        """A slider moved: decide now rather than at the next half hour. Comfort moves
-        are urgent in the planner, so they skip the minimum dwell."""
-        if new != old and new not in (None, "unknown", "unavailable"):
-            self.log(f"target changed: {entity} {old} -> {new}; deciding now")
-            self.run_in(self.on_decide, 2)
+    # ---- the clocks ------------------------------------------------------
+    def _each(self, what, pumps=None):
+        """Run `what` on each pump; one raising is logged, counted and alerted on, and
+        never stops the next."""
+        for p in (pumps if pumps is not None else list(self.pumps.values())):
+            try:
+                getattr(p, what)()
+                p.failures = 0
+            except Exception as exc:
+                p.failures += 1
+                self.log(f"{p.label} {what} failed ({p.failures} in a row): "
+                         f"{traceback.format_exc()}", level="ERROR")
+                if p.failures == FAIL_ALERT_TICKS:
+                    self.alert(f"{p.label} keeps failing",
+                               f"{what} has raised {p.failures} times in a row: {exc!r}",
+                               f"underflow_{p.name or 'app'}_failing")
 
     def on_decide(self, kwargs=None):
-        self._apply_targets()
-        obs = self._observe()
-        now = self.datetime(aware=True)
-        result = plan(self._rates(), now, obs.get("room_temp_mean"), self.planner_cfg)
+        self._each("decide")
+        self._run_probes(self.datetime(aware=True))
 
-        proposed, source, reason = choose(self.held, result["setpoint_now"],
-                                          obs.get("room_temp_mean"), self.planner_cfg,
-                                          self.mirror_cfg, now)
+    def on_reconcile(self, kwargs=None):
+        self._each("reconcile")
+        self._run_probes(self.datetime(aware=True))
 
-        # A running step test overrides everything above, price included.
-        self._update_step(obs, now)
-        if self.step.active:
-            proposed, source, reason = self.step.min_flow, "test", self.step.reason
-            result = dict(result, urgent=True)   # block edges must not wait out the dwell
-        self.source, self.source_reason = source, reason
+    def _decide_one(self, kwargs):
+        p = self.pumps.get(kwargs.get("pump"))
+        if p is not None:
+            self._each("decide", [p])
 
-        # Deadband and minimum dwell: a "cheapest third" rule near its threshold flips as
-        # the horizon rolls, and each flip is a write on a link that drops 30 times a
-        # day. Comfort overrides skip the dwell.
-        if proposed is not None and self.desired is not None:
-            held_for = (now - self.desired_since).total_seconds() if self.desired_since else self.min_dwell
-            if abs(proposed - self.desired) < self.deadband:
-                proposed = self.desired
-            elif held_for < self.min_dwell and not result.get("urgent"):
-                self.log(f"holding {self.desired:g} for another {(self.min_dwell - held_for) / 60:.0f} min "
-                         f"rather than moving to {proposed:g} (dwell)")
-                proposed = self.desired
-        if proposed != self.desired:
-            self.log(f"target {self.desired} -> {proposed} ({source}: {reason})")
-            self.desired, self.desired_since = proposed, now
-
-        self._publish_plan(result, obs, now)
-        self._publish_shadows(result, obs, now)
-        self._shadow_plan(obs, now)
-        self._reconcile(obs, now)
-
-    def _rates(self):
-        raw = []
-        for key in ("agile_rates_today", "agile_rates_tomorrow"):
-            ent = self.entities.get(key)
-            if ent:
-                r = self.get_state(ent, attribute="rates")
-                if isinstance(r, list):
-                    raw.extend(r)
-        return normalise_rates(raw)
-
-    def _publish_plan(self, result, obs, now):
-        cfg = self.planner_cfg
-        self._publish(
-            self.plan_entity,
-            self.desired if self.desired is not None else result["setpoint_now"],
-            {
-                "friendly_name": "underflow planned min flow temp",
-                "icon": "mdi:thermometer-water",
-                "unit_of_measurement": "°C",
-                "device_class": "temperature",
-                "state_class": "measurement",
-                "reason": self.source_reason,
-                "source": self.source,
-                "planner_setpoint": result["setpoint_now"],
-                "planner_reason": result["reason"],
-                "mirror_value": self.held.value,
-                "mirror_age_minutes": (round(self.held.age(now) / 60, 1)
-                                       if self.held.age(now) is not None else None),
-                "dry_run": self.dry_run,
-                "cheap_threshold_gbp_kwh": result.get("threshold"),
-                "cheap_slots": result.get("cheap_slots"),
-                "horizon_slots": result.get("horizon_slots"),
-                "baseline": cfg.baseline, "boost": cfg.boost,
-                "comfort_min": cfg.comfort_min, "comfort_max": cfg.comfort_max,
-                "slots": result["slots"],
-            },
-        )
-        self.log(f"plan: min flow {self.desired} via {self.source} ({self.source_reason}); "
-                 f"{result.get('cheap_slots')} cheap of {result.get('horizon_slots')} slots")
-        test = ({"reason": self.step.reason, "ends": self.step.block.end if self.step.block else None}
-                if self.step.active else None)
-        lines = describe(obs, result, now, cfg, self.dry_run, test=test,
-                         room_label=self.args.get("room_label", "the house"))
-        self._publish(
-            self.narrative_entity,
-            summary(lines),
-            {"friendly_name": "underflow: what's going on", "icon": "mdi:text-long",
-             "text": "\n".join(f"- {l}" for l in lines), "lines": lines,
-             "updated": now.isoformat(timespec="seconds")},
-        )
-
-    def _publish_shadows(self, result, obs, now):
-        """Compute and publish what the alternative demand sources would ask for.
-        Nothing here touches `self.desired` or the bus."""
-        room = obs.get("room_temp_mean")
-        common = {"icon": "mdi:thermometer-water", "unit_of_measurement": "°C",
-                  "device_class": "temperature", "state_class": "measurement",
-                  "shadow": True, "room_temp_179": room, "actual_desired": self.desired,
-                  "updated": now.isoformat(timespec="seconds")}
-
-        if self.shared_sensor:
-            sensor = self._num(self.shared_sensor)
-            self.shared_value, why = shared_step(self.shared_value, sensor, room,
-                                                 self.shared_cfg, self.planner_cfg)
-            self._publish(self.shared_entity, self.shared_value, {
-                **common, "friendly_name": "underflow shadow: aim at shared sensor",
-                "reason": why, "shared_sensor": self.shared_sensor,
-                "shared_sensor_temp": sensor, "target": self.shared_cfg.target})
-
-        if self.mirror_shadow_source:
-            v177 = self._num(self.mirror_shadow_source)
-            held = Held(v177, now) if v177 is not None else Held()
-            value, _, why = choose(held, result["setpoint_now"], room, self.planner_cfg,
-                                   dataclasses.replace(self.mirror_cfg, enabled=True), now)
-            self._publish(self.mirror_shadow_entity, value, {
-                **common, "friendly_name": "underflow shadow: copy 177",
-                "reason": why, "value_177": v177})
-
-    # ---- step test ------------------------------------------------------
-    def _update_step(self, obs, now):
-        prev = self.step
-        # Latches are keyed to the block they tripped in and compared with the block
-        # running *now* — not the previous tick's, which is empty after a restart.
-        cur = current_block(self.test_cfg, now)
-        warm_ent = self.entities.get("warmest_room")
-        step = test_step(self.test_cfg, now, obs.get("room_temp_mean"), self.planner_cfg.baseline,
-                         guard_latched=persist.same_block(self._guard_block, cur),
-                         warmest=self._num(warm_ent) if warm_ent else None,
-                         cap_latched=persist.same_block(self._cap_block, cur))
-        if step.block:
-            k = persist.block_key(step.block)
-            if step.guarded and not persist.same_block(self._guard_block, step.block):
-                self.log(f"step test guard: {step.reason}", level="WARNING")
-                self._alert(f"underflow test: {step.reason}")
-                self._guard_block = k
-            if step.capped and not persist.same_block(self._cap_block, step.block):
-                self.log(f"step test ceiling: {step.reason}")
-                self._cap_block = k
-        if step.active:
-            if not prev.active or (prev.block and step.block and prev.block.index != step.block.index):
-                self.log(f"step test: {step.reason}")
-            self.zone_desired = step.zone
-            self._test_was_active = True
-        elif self._test_was_active:
-            # Test over (or removed from config): put the zone back to normal once.
-            self.log("step test finished; zone back to day, planner resumes")
-            self.zone_desired = "day"
-            self._test_was_active = False
-        self.step = step
-
-    def _reconcile_zone(self, signal_on, stable_for, now):
-        """Keep zone 1's mode where the test wants it. The script does the bus write and
-        its own read-back; this only notices drift and asks again, at most every 3 min."""
-        if not (self.zone_entity and self.zone_desired):
-            return None, None
-        current = self.get_state(self.zone_entity)
-        if current == self.zone_desired:
-            if self.zone_desired == "day" and not self.step.active:
-                self.zone_desired = None             # restored; stop managing the zone
-            return current, "applied"
-        if not signal_on or stable_for < self.reconcile_cfg.settle_seconds:
-            return current, "waiting for a stable link"
-        if self._zone_last_write and (now - self._zone_last_write).total_seconds() < 180:
-            return current, "write in flight"
-        self._zone_last_write = now
-        if self.dry_run or not self.zone_script:
-            self.log(f"DRY RUN: would set zone {current} -> {self.zone_desired}")
-            return current, "dry run"
-        self.log(f"WRITE: {self.zone_script} mode={self.zone_desired} (was {current})")
-        self.call_service("script/turn_on", entity_id=self.zone_script,
-                          variables={"mode": self.zone_desired})
-        return current, "write"
+    def _on_target_change(self, entity, attribute, old, new, kwargs):
+        """A slider moved: decide that pump now rather than at the next half hour. Comfort
+        moves are urgent in the planner, so they skip the minimum dwell."""
+        if new != old and new not in (None, "unknown", "unavailable"):
+            self.log(f"target changed: {entity} {old} -> {new}; deciding {kwargs.get('pump') or 'now'}")
+            self.run_in(self._decide_one, 2, pump=kwargs.get("pump"))
 
     def _on_averaged(self, entity, attribute, old, new, kwargs):
-        avg = self._averages.get(kwargs.get("name"))
-        if avg is not None:
-            avg.update(new, self.datetime(aware=True))
-
-    def _log_row(self, obs, now, zone_state, reading):
-        if not self.log_dir:
-            return
-        # The decide tick also runs a reconcile; one row per 5-minute slot is enough.
-        if self._last_log and (now - self._last_log).total_seconds() < 60:
-            return
-        self._last_log = now
-        try:
-            row = {"ts": now.isoformat(timespec="seconds")}
-            for k in ("outside_temp_met_office", "outside_temp_179_sensor", "outside_temp_177_sensor",
-                      "room_temp_mean", "flow_temp", "flow_temp_circuit", "return_temp",
-                      "power_in_kw", "power_out_kw", "heat_curve", "min_flow_temp", "max_flow_temp",
-                      "agile_rate_now", "pump_status", "mode"):
-                row[k] = obs.get(k)
-            for name, spec in self.log_columns.items():
-                ent, _, attr = str(spec).partition("|")
-                row[name] = self.get_state(ent, attribute=attr) if attr else self.get_state(ent)
-            for name, avg in self._averages.items():
-                m = avg.take(now)
-                row[name] = None if m is None else round(m, 1)
-            for name, spec in self.log_bus.items():
-                circuit, _, register = str(spec).partition(" ")
-                r = self.bus.read_register(circuit, register, max_age=60) if self.bus else None
-                row[name] = r.value if r is not None and r.ok else None
-            row.update({
-                "desired_min_flow": self.desired, "bus_min_flow": reading.value if reading else None,
-                "source": self.source, "zone_desired": self.zone_desired, "zone_state": zone_state,
-                "test_block": (self.step.block.index + 1) if self.step.block else None,
-                "test_level": (self.step.block.level if self.step.block else None),
-                "test_guarded": self.step.guarded if self.step.active else None,
-                "test_capped": self.step.capped if self.step.active else None,
-                "dry_run": self.dry_run,
-            })
-            if self._last_shadow:
-                row["model_level"] = self._last_shadow.get("state")
-                row["model_pred_3h"] = self._last_shadow.get("predicted_coldest_3h")
-                row["model_slab_est"] = self._last_shadow.get("slab_estimate")
-            datalog.append(self.log_dir, self.log_prefix, now, row)
-            self._last_row = row
-        except Exception as exc:   # the log must never take the controller down
-            self.log(f"datalog failed: {exc!r}", level="WARNING")
-
-    # ---- restart tolerance ----------------------------------------------
-    def _save_state(self, now):
-        if not self.state_file:
-            return
-        try:
-            st = {"desired": self.desired, "desired_since": self.desired_since,
-                  "guard_block": self._guard_block, "cap_block": self._cap_block,
-                  "test_was_active": self._test_was_active, "zone_desired": self.zone_desired,
-                  "last_log": self._last_log}
-            if self.shadow is not None:
-                kf, c = self.shadow.kf, self.shadow.cache
-                st["kf"] = None if kf.x is None else {"x": kf.x.tolist(), "P": kf.P.tolist(),
-                                                      "at": self.shadow.last_obs}
-                st["forecast"] = {"met": persist.series_out(c.met), "met_at": c.met_at,
-                                  "sol": persist.series_out(c.sol), "sol_at": c.sol_at}
-            persist.save(self.state_file, st, now)
-        except Exception as exc:          # never let persistence take control down
-            self.log(f"state save failed: {exc!r}", level="WARNING")
-
-    def _restore_state(self):
-        if not self.state_file:
-            return None
-        now = self.datetime(aware=True)
-        doc = persist.load(self.state_file, now)
-        if not doc:
-            self.log(f"no recent saved state at {self.state_file}; starting fresh")
-            return None
-        restored = []
-        try:
-            if doc.get("desired") is not None:
-                self.desired = float(doc["desired"])
-                self.desired_since = persist._dt(doc.get("desired_since")) or now
-                restored.append(f"target {self.desired:g}")
-            self._guard_block, self._cap_block = doc.get("guard_block"), doc.get("cap_block")
-            if self._guard_block or self._cap_block:
-                restored.append("test guard latches")
-            self._test_was_active = bool(doc.get("test_was_active"))
-            if doc.get("zone_desired"):
-                self.zone_desired = doc["zone_desired"]
-                restored.append(f"zone wanted {self.zone_desired}")
-            self._last_log = persist._dt(doc.get("last_log"))
-            kf = doc.get("kf")
-            at = persist._dt(kf.get("at")) if kf else None
-            if self.shadow is not None and kf and at and (now - at).total_seconds() < 3600:
-                self.shadow.kf.x = np.array(kf["x"], float)
-                self.shadow.kf.P = np.array(kf["P"], float)
-                self.shadow.last_obs = at
-                restored.append(f"slab estimate {self.shadow.slab:.1f}")
-            fc = doc.get("forecast")
-            if self.shadow is not None and fc:
-                c = self.shadow.cache
-                c.met, c.met_at = persist.series_in(fc.get("met")), persist._dt(fc.get("met_at"))
-                c.sol, c.sol_at = persist.series_in(fc.get("sol")), persist._dt(fc.get("sol_at"))
-                restored.append("forecasts")
-        except Exception as exc:
-            self.log(f"saved state unusable ({exc!r}); starting fresh", level="WARNING")
-            return None
-        age = (now - doc["saved_at"]).total_seconds() / 60
-        self.log(f"restored state saved {age:.0f} min ago: {', '.join(restored) or 'nothing to restore'}")
-        return doc["saved_at"]
-
-    # ---- stage-2 model planner (shadow) ---------------------------------
-    def _shadow_observe(self, obs, now):
-        if not self.shadow or not self._last_row:
-            return
-        try:
-            row = self._last_row
-            heat = None
-            if obs.get("mode") == "heating":
-                try:
-                    heat = float(row.get(self.model_forecast.get("heat_column", "heat_out_kw_bus")))
-                except (TypeError, ValueError):
-                    heat = None
-            pv = row.get("pv_w")
-            self.shadow.observe(now, obs.get("room_temp_mean"), heat or 0.0,
-                                obs.get("outside_temp_met_office"),
-                                (float(pv) / 1000.0) if isinstance(pv, (int, float)) else 0.0)
-        except Exception as exc:
-            self.log(f"model observe failed: {exc!r}", level="WARNING")
-
-    def _fetch_forecasts(self, now):
-        met = sol = None
-        ent = self.model_forecast.get("weather")
-        if ent:
-            try:
-                resp = self.call_service("weather/get_forecasts", entity_id=ent, type="hourly",
-                                         return_response=True)
-                met = F.parse_met(F.find_forecast_list(resp))
-                if not met:
-                    raise ValueError(f"no hourly forecast in response ({type(resp).__name__})")
-            except Exception as exc:
-                if repr(exc) != self._forecast_err:
-                    self.log(f"temperature forecast unavailable: {exc!r}", level="WARNING")
-                    self._forecast_err = repr(exc)
-        lists = [self.get_state(e, attribute="detailedForecast") for e in self.model_forecast.get("solcast", [])]
-        sol = F.parse_solcast(*[l for l in lists if isinstance(l, list)])
-        self.shadow.cache.offer(now, met=met or None, sol=sol or None)
-
-    def _shadow_plan(self, obs, now):
-        if not self.shadow:
-            if self.args.get("model"):
-                self._publish(self.model_entity, "waiting", {
-                    "friendly_name": "underflow model planner (shadow)", "icon": "mdi:brain",
-                    "reason": "no fitted parameters yet (model.params)"})
-            return
-        try:
-            self._fetch_forecasts(now)
-            out = self.shadow.plan(now, self._rates(), self.planner_cfg.comfort_min,
-                                   obs.get("outside_temp_met_office"))
-            self._last_shadow = out
-            state = out.pop("state")
-            self._publish(self.model_entity, state, {
-                "friendly_name": "underflow model planner (shadow)", "icon": "mdi:brain",
-                "shadow": True, "updated": now.isoformat(timespec="seconds"),
-                "floor": self.planner_cfg.comfort_min, "top": self.shadow.cfg.top, **out})
-            out["state"] = state
-            for key, label in (("predicted_coldest_3h", "predicted coldest room in 3 h"),
-                               ("slab_estimate", "estimated slab temperature")):
-                if out.get(key) is not None:
-                    self._publish(f"{self.model_entity}_{key}", out[key], {
-                        "friendly_name": f"underflow model: {label}", "unit_of_measurement": "°C",
-                        "device_class": "temperature", "state_class": "measurement",
-                        "icon": "mdi:brain"})
-            self.log(f"model (shadow): {state} now; coldest in 3 h {out.get('predicted_coldest_3h')} °C; "
-                     f"24 h {out.get('elec_kwh_24h')} kWh £{out.get('cost_24h_gbp')}"
-                     + (f"; {'; '.join(out['notes'])}" if out.get("notes") else ""))
-        except Exception as exc:
-            self.log(f"model plan failed: {exc!r}", level="WARNING")
-
-    # ---- reconcile: make the register match ----------------------------
-    def on_reconcile(self, kwargs=None):
-        self._reconcile(self._observe(), self.datetime(aware=True))
-
-    def _reconcile(self, obs, now):
-        # Refresh the demand signal first: it is read over 177's link, which is the bad
-        # one, so a failure here must leave the last-good value standing, not clear it.
-        mirror_reading = None
-        if self.mirror_bus is not None:
-            mirror_reading = self.mirror_bus.read_register(
-                self.mirror_circuit, self.mirror_register, max_age=self.bus_max_age)
-            self.held = hold(self.held, mirror_reading, now)
-
-        reading = self._read_own_register(now)
-        signal_on, stable_for = self._signal()
-        decision, self.reg_state = decide(self.desired, reading, signal_on, stable_for,
-                                          self.reg_state, now, self.reconcile_cfg)
-        zone_state, zone_action = self._reconcile_zone(signal_on, stable_for, now)
-
-        extra = {
-            "desired_min_flow": self.desired,
-            "demand_source": self.source,
-            "demand_reason": self.source_reason,
-            "bus_value": reading.value if reading else None,
-            "bus_error": reading.error if reading else None,
-            "bus_fresh": bool(reading and reading.ok),
-            "bus_value_age_s": (round(reading.age(now)) if reading and reading.age(now) is not None else None),
-            "bus_signal": signal_on,
-            "bus_signal_stable_s": None if stable_for == float("inf") else round(stable_for),
-            "mirror_value": self.held.value,
-            "mirror_error": mirror_reading.error if mirror_reading else None,
-            "reconcile_action": decision.action,
-            "reconcile_reason": decision.reason,
-            "zone_state": zone_state,
-            "zone_desired": self.zone_desired,
-            "zone_action": zone_action,
-            "test_active": self.step.active,
-            "state_restored_from": self.restored.isoformat(timespec="minutes") if self.restored else None,
-            "comfort_min": self.planner_cfg.comfort_min,
-            "comfort_max": self.planner_cfg.comfort_max,
-            "test_floor": self.test_cfg.floor if self.test_cfg.enabled else None,
-            "test_ceiling": self.test_cfg.ceiling if self.test_cfg.enabled else None,
-            "test_reason": self.step.reason if self.step.active else None,
-            "test_ends": (self.test_cfg.end_at().isoformat(timespec="minutes")
-                          if self.test_cfg.enabled and self.test_cfg.end_at() else None),
-            **self.reg_state.as_attributes(),
-        }
-        self._publish_status(obs, extra)
-
-        if decision.action != self._last_decision or decision.action == "write":
-            self.log(f"reconcile: {decision.action} - {decision.reason}")
-        self._last_decision = decision.action
-
-        self._run_probes(now)
-
-        if decision.alert:
-            self._alert(decision.alert)
-        if decision.writes:
-            # Since writes start the script without waiting (0.1.3), a reconcile right
-            # after one still reads the old value; don't fire the same write twice while
-            # the first (~30 s with read-back) is in flight.
-            last = self._write_at
-            if last and last[1] == self.desired and (now - last[0]).total_seconds() < 90:
-                self.log(f"write of {self.desired} already in flight; not repeating")
-            else:
-                self._write(self.desired)
-                self._write_at = (now, self.desired)
-        self._log_row(obs, now, zone_state, reading)
-        self._shadow_observe(obs, now)
-        self._save_state(now)
-
-    def _read_own_register(self, now):
-        """Get the register we control, preferring ebusd's cache when its provenance is
-        good enough. `find -V` costs nothing on the bus and returns the value *with* the
-        time ebusd last had it off the wire, so we only pay for a real transaction when
-        that is too old to act on — or when we have just written and need the wire."""
-        if self.bus is None:
-            return None
-        if not self._force_next_read:
-            found = self.bus.find_register(self.circuit, self.register)
-            age = found.age(now)
-            # -MAX_CLOCK_SKEW guards the same hazard as the probe: a clock running ahead
-            # would make any stale value look new. Fall through to a real read instead.
-            if found.ok and age is not None and -MAX_CLOCK_SKEW <= age <= self.bus_max_age:
-                return found
-        self._force_next_read = False
-        return self.bus.read_register(self.circuit, self.register, max_age=0)
+        p = self.pumps.get(kwargs.get("pump"))
+        if p is not None:
+            p.on_averaged(kwargs.get("avg"), new, self.datetime(aware=True))
 
     # ---- liveness probes -----------------------------------------------
     def _run_probes(self, now):
         """Ask ebusd when it last had each device's value off the wire (`find -V`) and
         publish a debounced alive/dead verdict.
 
-        This is a query to ebusd's cache, not a bus transaction, so the four probes run
-        back to back. (Until 0.1.4 they were spaced 3 s apart with time.sleep, a leftover
-        from when they were `read -f`; that held every reconcile callback for ~10 s.)
-        A single miss is a WiFi blip; `dead_after` consecutive ones is a device gone.
+        This is a query to ebusd's cache, not a bus transaction, so the probes run back
+        to back. A single miss is a WiFi blip; `dead_after` consecutive ones is a device
+        gone.
         """
         if not self.probes:
             return
         self._probe_cycle += 1
-        for i, t in enumerate(self.probes):
+        for t in self.probes:
             was_dead = self.probe_states[t.name].dead(self.probe_dead_after)
             if was_dead and self._probe_cycle % self.probe_down_every:
                 continue          # already down: don't hammer a failing link every cycle
@@ -830,31 +300,3 @@ class Underflow(hass.Hass):
         attrs["stale_after_seconds"] = self.probe_stale_after
         self._publish(self.probe_entity, state,
                       {"friendly_name": "underflow eBUS device probe", "icon": "mdi:lan-check", **attrs})
-
-    def _write(self, value):
-        if self.dry_run:
-            self.log(f"DRY RUN: would call {self.write_script} flow_temp={value}")
-            return
-        if not self.write_script:
-            self.log("no write_script configured; not writing", level="WARNING")
-            return
-        self.log(f"WRITE: {self.write_script} flow_temp={value}")
-        # quiet=True: the script's own two-try alert would fire on every WiFi blip, and
-        # this loop is the thing that retries. Sustained failure is alerted from here.
-        # Started with script.turn_on, not called directly: the script's write + read-back
-        # takes ~30 s, and calling it blocked this callback until HA's 10 s request
-        # timeout ("Timed out waiting for request") on every write. Nothing here needs the
-        # result — the next reconcile reads the register off the wire.
-        entity = self.write_script.replace("/", ".", 1) if "/" in self.write_script else self.write_script
-        self.call_service("script/turn_on", entity_id=entity,
-                          variables={"flow_temp": value, "quiet": True})
-        # The next reconcile must see the wire, not a cache that predates the write.
-        self._force_next_read = True
-
-    def _alert(self, message):
-        self.log(f"ALERT: {message}", level="WARNING")
-        title = f"underflow ({self.register}) needs a look"
-        self.call_service("persistent_notification/create", title=title, message=message,
-                          notification_id=f"underflow_{self.register.lower()}")
-        if self.alert_service:
-            self.call_service(self.alert_service, title=title, message=message)
