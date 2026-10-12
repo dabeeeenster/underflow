@@ -1,0 +1,209 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["numpy>=2", "scipy>=1.13", "pyyaml>=6"]
+# ///
+"""Run: uv run tests/test_pumps.py
+
+One app, two pumps (0.3.0). With a stand-in for AppDaemon, the real site class must:
+read a pre-0.3.0 single-pump apps.yaml exactly as before (same entity ids, names, alert
+id); build each pump under `pumps:` from its own block plus the inherited site keys,
+without leaking a step test or register to the other half; refuse a pump pointed at a
+forbidden register (177's cooling circuit) while the other still starts; keep running
+one pump when the other raises; route a slider change to its own pump only; and judge
+comfort on the coldest of a room list, skipping an unavailable room.
+"""
+import sys, types, pathlib, datetime as dt
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+import yaml
+
+BST = dt.timezone(dt.timedelta(hours=1))
+NOW = dt.datetime(2026, 10, 12, 12, 0, 5, tzinfo=BST)
+
+
+class FakeHass:
+    """Just enough of appdaemon.plugins.hass.hassapi.Hass."""
+    def __init__(self, args, states=None):
+        self.args, self.states = args, dict(states or {})
+        self.published, self.calls, self.listeners, self.run_ins, self.logs = {}, [], [], [], []
+
+    def get_state(self, entity_id, attribute=None):
+        st = self.states.get(entity_id)
+        if isinstance(st, dict):
+            return st.get(attribute) if attribute else st.get("state")
+        return None if attribute else st
+
+    def set_state(self, entity_id, state=None, attributes=None):
+        self.published[entity_id] = (state, attributes or {})
+
+    def call_service(self, service, **kw):
+        self.calls.append((service, kw))
+        return {}
+
+    def listen_state(self, cb, entity, **kw):
+        self.listeners.append((cb, entity, kw))
+
+    def run_every(self, cb, start, interval):
+        return len(self.run_ins)
+
+    def run_in(self, cb, delay, **kw):
+        self.run_ins.append((cb, kw))
+
+    def cancel_timer(self, t):
+        pass
+
+    def log(self, msg, level="INFO"):
+        self.logs.append((level, msg))
+
+    def datetime(self, aware=True):
+        return NOW
+
+
+# appdaemon is not installed here: give underflow.py the stand-in as its base class.
+for name in ("appdaemon", "appdaemon.plugins", "appdaemon.plugins.hass"):
+    sys.modules.setdefault(name, types.ModuleType(name))
+hassapi = types.ModuleType("appdaemon.plugins.hass.hassapi")
+hassapi.Hass = FakeHass
+sys.modules["appdaemon.plugins.hass.hassapi"] = hassapi
+import underflow as U
+import pump as P
+
+
+def app(args, states=None):
+    a = U.Underflow(args, states)
+    a.initialize()
+    return a
+
+
+def alerts(a):
+    return [kw for s, kw in a.calls if s == "persistent_notification/create"]
+
+
+# --- single pump, pre-0.3.0 config: everything named as before ------------------------
+example = yaml.safe_load((ROOT / "apps.example.yaml").read_text())["underflow"]
+a = app(example, {"sensor.room_temperature_mean": "20.4", "sensor.ebusd_outsidetemp": "11.5"})
+assert list(a.pumps) == [None], a.pumps
+p = a.pumps[None]
+assert (p.status_entity, p.plan_entity) == ("sensor.underflow", "sensor.underflow_planned_min_flow")
+assert p.outside_sensors == {"179": "sensor.ebusd_outsidetemp", "177": "sensor.other_outsidetemp"}
+a.on_decide()
+state, attrs = a.published["sensor.underflow"]
+assert state == "observing" and attrs["friendly_name"] == "underflow heat pump controller", (state, attrs)
+assert attrs["outside_temp_179_sensor"] == "11.5" and attrs["room_temp_mean"] == "20.4"   # ha_safe: numbers go as strings
+assert a.published["sensor.underflow_planned_min_flow"][1]["friendly_name"] == "underflow planned min flow temp"
+assert a.published["sensor.underflow_whats_going_on"][1]["friendly_name"] == "underflow: what's going on"
+p._alert("test")
+assert alerts(a)[-1]["notification_id"] == "underflow_hc1minflowtempdesired"
+assert alerts(a)[-1]["title"] == "underflow (Hc1MinFlowTempDesired) needs a look"
+
+# --- two pumps: own blocks plus inherited site keys, nothing leaking -------------------
+two = yaml.safe_load((ROOT / "examples" / "two-pumps.yaml").read_text())["underflow"]
+cfgs = dict(U.pump_configs(two))
+assert list(cfgs) == ["179", "177"]
+c177, c179 = cfgs["177"], cfgs["179"]
+assert c177["entities"]["weather"] == "weather.met_office_wood_green"          # inherited
+assert c177["entities"]["outside_sensors"]["177"].endswith("177_broadcast_outsidetemp")
+assert c177["entities"]["pump_status"].startswith("sensor.heating_ebusd177")   # its own
+assert c177["datalog"]["dir"] == "/config/underflow_log" and c177["datalog"]["prefix"] == "177"
+assert "model" not in c177 and "zone" not in c177 and "targets" not in c177   # 179's stay 179's
+assert c177["dry_run"] is True and c179["dry_run"] is False
+assert "probes" not in c177 and "pumps" not in c177
+assert c179["zone"]["mode_off"] == "off" and P.zone_value(False, "x") == "off"     # YAML bare off
+
+states = {
+    "sensor.179_coldest_room": "20.6",
+    "sensor.tado_smart_thermostat_ru2614901760_current_temperature": "21.3",   # 177 Kitchen
+    "sensor.tado_smart_thermostat_ru1844530688_current_temperature": "20.2",   # 177 Upstairs
+    "sensor.tado_smart_thermostat_ru3769716224_current_temperature": "unavailable",
+    "sensor.tado_smart_thermostat_ru1602442752_current_temperature": "19.1",   # Lotte: logged only
+}
+two["probes"]["targets"] = []     # no sockets in a test
+for c in two["pumps"].values():
+    c["ebusd"].pop("host")
+    c.pop("state_file")
+two["datalog"].pop("dir")
+a = app(two, states)
+assert set(a.pumps) == {"179", "177"}
+a.on_decide()
+assert a.published["sensor.underflow_177"][1]["room_temp_mean"] == "20.2"      # coldest, Tanya skipped
+assert a.published["sensor.underflow_179"][1]["room_temp_mean"] == "20.6"
+assert a.published["sensor.underflow_177_planned_min_flow"][1]["friendly_name"] == "underflow 177 planned min flow temp"
+assert a.published["sensor.underflow_177"][0] == "observing"                  # dry run
+assert a.published["sensor.underflow_179"][0] == "controlling"
+a.pumps["177"]._alert("x")
+assert alerts(a)[-1]["notification_id"] == "underflow_177_hc2minflowtempdesired"
+assert alerts(a)[-1]["title"].startswith("underflow 177 ")
+
+# --- forbid_registers: 177 pointed at its cooling circuit never starts -----------------
+bad = yaml.safe_load((ROOT / "examples" / "two-pumps.yaml").read_text())["underflow"]
+for c in bad["pumps"].values():
+    c["ebusd"].pop("host"); c.pop("state_file")
+bad["probes"]["targets"] = []
+bad["datalog"].pop("dir")
+bad["pumps"]["177"]["ebusd"]["register"] = "Hc1MinFlowTempDesired"
+a = app(bad, states)
+assert set(a.pumps) == {"179"}, a.pumps                                       # 179 still runs
+assert a.published["sensor.underflow_177"][0] == "refused"
+assert "Hc1MinFlowTempDesired" in a.published["sensor.underflow_177"][1]["reason"]
+assert any(kw["notification_id"] == "underflow_177_refused" for kw in alerts(a))
+assert any(lvl == "ERROR" for lvl, _ in a.logs)
+# the zone entity and the declared write register are checked too
+assert P.forbidden({"forbid_registers": ["Z1*"], "zone": {"entity": "select.heating_ebusd177_ctlv2_z1opmode"},
+                    "ebusd": {"register": "Hc2MinFlowTempDesired"}}) == ["z1opmode"]
+assert P.forbidden({"forbid_registers": ["hc1*"], "write_register": "Hc1MinFlowTempDesired",
+                    "ebusd": {"register": "Hc2MinFlowTempDesired"}}) == ["Hc1MinFlowTempDesired"]
+assert P.forbidden({"forbid_registers": ["Hc1*", "Z1*"], "ebusd": {"register": "Hc2MinFlowTempDesired"},
+                    "zone": {"entity": "select.heating_ebusd177_ctlv2_z2opmode"}}) == []
+# two pumps publishing to the same status sensor: the second is refused
+dup = yaml.safe_load((ROOT / "examples" / "two-pumps.yaml").read_text())["underflow"]
+for c in dup["pumps"].values():
+    c["ebusd"].pop("host"); c.pop("state_file")
+dup["probes"]["targets"] = []
+dup["datalog"].pop("dir")
+dup["pumps"]["177"]["status_entity"] = "sensor.underflow_179"
+assert set(app(dup, states).pumps) == {"179"}
+
+# --- one pump raising never stops the other --------------------------------------------
+a = app(two, states)
+calls = []
+def boom():
+    raise RuntimeError("177 bus exploded")
+a.pumps["177"].decide = boom
+a.pumps["177"].reconcile = boom
+real = a.pumps["179"].reconcile
+a.pumps["179"].reconcile = lambda: (calls.append("179"), real())
+order = list(a.pumps)
+for i in range(U.FAIL_ALERT_TICKS):
+    a.on_reconcile()
+assert calls == ["179"] * U.FAIL_ALERT_TICKS, calls
+assert a.pumps["177"].failures == U.FAIL_ALERT_TICKS and a.pumps["179"].failures == 0
+assert sum(kw["notification_id"] == "underflow_177_failing" for kw in alerts(a)) == 1
+a.on_decide()                                                                # decide too
+assert a.published["sensor.underflow_179"][0] == "controlling"
+
+# --- a slider re-decides its own pump only --------------------------------------------
+a = app(two, states)
+slider = [(cb, kw) for cb, ent, kw in a.listeners if ent == "input_number.underflow_179_comfort_floor"]
+assert len(slider) == 1 and slider[0][1]["pump"] == "179"
+assert all(kw.get("pump") in ("179", "177") for _, _, kw in a.listeners)
+decided = []
+for n, p in a.pumps.items():
+    p.decide = (lambda n=n: decided.append(n))
+cb, kw = slider[0]
+cb("input_number.underflow_179_comfort_floor", "state", "20.0", "20.5", kw)
+fn, rkw = a.run_ins[-1]
+fn(rkw)
+assert decided == ["179"], decided
+# averaged columns (PV) are fed to each pump separately: both log pv_w
+assert {kw["pump"] for _, ent, kw in a.listeners if ent == "sensor.solar_panel_production_w"} == {"179", "177"}
+
+# --- shared inputs are fetched once per tick ------------------------------------------
+a = app(two, states)
+a.on_decide()
+gets = [s for s, _ in a.calls if s == "weather/get_forecasts"]
+assert len(gets) == 1, gets                     # 179's model planner
+a.forecasts("weather.met_office_wood_green", two["pumps"]["179"]["model"]["forecast"]["solcast"])
+assert len([s for s, _ in a.calls if s == "weather/get_forecasts"]) == 1      # memoised within the tick
+
+print("ok: single-pump config unchanged, two pumps built and isolated, forbidden registers refused, "
+      "a failing pump never stops the other, sliders routed, comfort on the coldest available room")
