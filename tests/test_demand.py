@@ -16,7 +16,7 @@ on = MirrorConfig(enabled=True)
 
 # --- mirror disabled: the local plan decides ---------------------------------
 v, src, why = choose(Held(), 32.0, 21.5, pc, off, T0)
-assert (v, src) == (32.0, "planner") and "disabled" in why, (v, src, why)
+assert (v, src, why) == (32.0, "planner", "local plan"), (v, src, why)
 
 # --- hold() advances only on a good reading ----------------------------------
 h = hold(Held(), Reading(30.0, None, T0), T0)

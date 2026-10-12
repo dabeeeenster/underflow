@@ -68,7 +68,7 @@ def choose(held: Held, planner_setpoint: float | None, room_temp: float | None,
         return planner_setpoint, "planner", f"mirror unavailable ({stale}), falling back to the local plan"
     if planner_setpoint is None:
         return None, "none", "no plan yet"
-    return planner_setpoint, "planner", "local plan (mirror disabled)"
+    return planner_setpoint, "planner", "local plan"
 
 
 def _comfort(value: float, room_temp: float | None, cfg) -> tuple[float, str]:

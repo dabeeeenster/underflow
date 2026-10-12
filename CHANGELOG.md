@@ -5,7 +5,7 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
-## 0.3.0 — unreleased
+## 0.3.0 — 2026-10-12
 
 One app, several pumps. Prepares underflow to drive 177 (Havenwise was stopped on 12 Oct
 2026) alongside 179, as one app rather than a second instance.
@@ -38,6 +38,11 @@ One app, several pumps. Prepares underflow to drive 177 (Havenwise was stopped o
   optional entities no longer raise.
 - Renamed on the shadow sensors: `room_temp_179` → `room_temp`, `value_177` →
   `source_value`; the copy shadow is now "copy the other half".
+- Narrative: a pump's `notes:` (list of strings) are added to its "what's going on" text,
+  for standing context such as "Havenwise was stopped; dry run first". The plan reason no
+  longer says "(mirror disabled)" on a pump that never had a mirror, and the stage line no
+  longer names step tests on a pump that doesn't run them.
+- Deployed 12 Oct 2026: 179 unchanged (live, step test), 177 added in dry run.
 - `examples/two-pumps.yaml`: the live 179 config under `pumps:` plus 177 in dry run (price
   planner only, Hc2, `forbid_registers: [Hc1*, Z1*]`, comfort on Kitchen/Upstairs/Tanya).
 - `tests/test_pumps.py`.

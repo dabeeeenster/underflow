@@ -50,9 +50,12 @@ def _dur(a: dt.datetime, b: dt.datetime):
 
 
 def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage: str = "1",
-             test: dict | None = None, room_label: str = "the house") -> list[str]:
+             test: dict | None = None, room_label: str = "the house",
+             notes: list[str] | None = None) -> list[str]:
     """`test`: {"reason": ..., "ends": datetime} while a step test is in charge (it replaces
-    the plan line). `room_label` names what `room_temp_mean` actually is."""
+    the plan line). `room_label` names what `room_temp_mean` actually is. `notes` are the
+    pump's own standing lines from config (what it is in the middle of), added before the
+    stage line."""
     lines = []
 
     # --- house and weather
@@ -116,10 +119,11 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
         lines.append(f"Dry run: nothing is being written to the heat pump. The room thermostats and {curve_txt} are in charge.")
     else:
         lines.append("Live: the controller writes the minimum flow temperature through the bounded script with read-back.")
+    lines.extend(n for n in (notes or []) if n)
     if test:
         lines.append("Stage 2: fixed blocks of heat and no heat, to fit the house model (lag, slab, sun). The planner resumes when the test ends.")
     else:
-        lines.append(f"Stage {stage}: rule-based Agile shifting. The house and COP models are not yet fitted; the step tests and the 5-minute log are collecting the data.")
+        lines.append(f"Stage {stage}: rule-based Agile shifting. The house and COP models are not yet fitted; the 5-minute log is collecting the data.")
     return lines
 
 

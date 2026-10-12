@@ -29,6 +29,8 @@ assert any(l.startswith("Step test in charge until") and "38 °C" in l for l in 
 assert not any(l.startswith("The plan") for l in lines3), lines3
 assert "the coldest room is at" in lines3[0], lines3[0]
 assert any(l.startswith("Stage 2") for l in lines3), lines3
+lines4 = describe(obs, p, now, cfg, dry_run=True, notes=["Havenwise stopped 12 Oct.", ""])
+assert lines4[-2] == "Havenwise stopped 12 Oct." and lines4[-1].startswith("Stage 1"), lines4
 lines2 = describe(obs2, plan([], now, None, cfg), now, cfg, dry_run=False)
 assert any("standby" in l for l in lines2) and any("No Agile prices" in l and "comfort band still applies" in l for l in lines2)
 print("narrative OK")

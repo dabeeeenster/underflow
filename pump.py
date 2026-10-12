@@ -417,7 +417,8 @@ class Pump:
         test = ({"reason": self.step.reason, "ends": self.step.block.end if self.step.block else None}
                 if self.step.active else None)
         lines = describe(obs, result, now, cfg, self.dry_run, test=test,
-                         room_label=self.args.get("room_label", "the house"))
+                         room_label=self.args.get("room_label", "the house"),
+                         notes=self.args.get("notes"))
         self._publish(
             self.narrative_entity,
             summary(lines),
