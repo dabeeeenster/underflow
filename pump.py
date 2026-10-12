@@ -78,6 +78,9 @@ class Pump:
         self.status_entity = cfg.get("status_entity", f"sensor.underflow_{name}" if name else "sensor.underflow")
         self.dry_run = bool(cfg.get("dry_run", True))
         self.min_dwell = float(cfg.get("min_dwell_minutes", 30)) * 60
+        # Ticks fire at :00:05 and :30:05 but a write lands a second or so into one, so the
+        # tick a full dwell later saw 29:59 and held for another slot (177, 16:00 12 Oct 2026).
+        self.dwell_slack = 60.0
         self.deadband = float(cfg.get("deadband", 0.5))
 
         pc = cfg.get("planner", {}) or {}
@@ -367,7 +370,7 @@ class Pump:
             held_for = (now - self.desired_since).total_seconds() if self.desired_since else self.min_dwell
             if abs(proposed - self.desired) < self.deadband:
                 proposed = self.desired
-            elif held_for < self.min_dwell and not result.get("urgent"):
+            elif held_for < self.min_dwell - self.dwell_slack and not result.get("urgent"):
                 self.log(f"holding {self.desired:g} for another {(self.min_dwell - held_for) / 60:.0f} min "
                          f"rather than moving to {proposed:g} (dwell)")
                 proposed = self.desired

@@ -9,6 +9,7 @@ Rules (deliberately simple; the optimiser replaces them in stage 3):
   * the rest                                             -> `baseline` (curve only)
   * room above `comfort_max`                             -> baseline regardless of price
   * room below `comfort_min`                             -> boost regardless of price
+  * a cheap slot priced above `max_boost_price`           -> baseline (not cheap enough)
   * negative or near-zero prices                         -> boost (free heat)
 """
 from __future__ import annotations
@@ -26,6 +27,10 @@ class PlannerConfig:
     comfort_min: float = 20.5    # °C room mean
     comfort_max: float = 22.5
     free_price: float = 0.01     # £/kWh at or below which a slot is always boosted
+    # £/kWh above which a slot is never boosted, however it ranks (None = no cap). The
+    # ranking is relative to what Octopus has published: before ~16:00 that ends at 23:00,
+    # so the cheapest third of a short horizon can be 29p (177, 12 Oct 2026).
+    max_boost_price: float | None = None
     no_rates_flow: float | None = None  # °C held when no prices are known (None = baseline)
 
 
@@ -64,15 +69,26 @@ def plan(rates: list[tuple[dt.datetime, float]], now: dt.datetime, room_temp: fl
     order = sorted(range(len(upcoming)), key=lambda i: (upcoming[i][1], upcoming[i][0]))
     cheap_idx = set(order[:k])
     threshold = upcoming[order[k - 1]][1]
+    cap = cfg.max_boost_price
+    if cap is not None and threshold > cap:
+        threshold = cap
 
     slots = []
     for i, (s, p) in enumerate(upcoming):
-        cheap = i in cheap_idx or p <= cfg.free_price
+        over_cap = cap is not None and p > cap
+        cheap = (i in cheap_idx and not over_cap) or p <= cfg.free_price
         level = cfg.boost if cheap else cfg.baseline
-        slots.append({"start": s.isoformat(), "price": p, "cheap": cheap, "min_flow": level})
+        slots.append({"start": s.isoformat(), "price": p, "cheap": cheap, "min_flow": level,
+                      "over_cap": i in cheap_idx and over_cap})
 
     current = next((sl for sl in slots if dt.datetime.fromisoformat(sl["start"]) <= now), slots[0])
-    setpoint, reason = current["min_flow"], ("cheap slot" if current["cheap"] else "not a cheap slot")
+    setpoint = current["min_flow"]
+    if current["cheap"]:
+        reason = "cheap slot"
+    elif current["over_cap"]:
+        reason = f"cheap for the horizon, but {current['price'] * 100:.1f}p is over the {cap * 100:g}p boost cap"
+    else:
+        reason = "not a cheap slot"
 
     setpoint, reason, urgent = _comfort(setpoint, reason, room_temp, cfg)
     return {"setpoint_now": setpoint, "reason": reason, "slots": slots, "threshold": threshold,

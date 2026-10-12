@@ -63,6 +63,7 @@ underflow:
         baseline: 20
         boost: 32
         cheap_fraction: 0.33
+        max_boost_price: 0.20 # £/kWh: never boost above this, however a slot ranks
         horizon_hours: 24
         comfort_min: 20.0
         comfort_max: 22.5
@@ -161,6 +162,7 @@ underflow:
         baseline: 20          # curve only (177's Hc2 curve is 0.6 since 12 Oct 2026)
         boost: 32
         cheap_fraction: 0.33
+        max_boost_price: 0.20 # £/kWh: never boost above this, however a slot ranks
         horizon_hours: 24
         comfort_min: 20.0     # on the coldest of entities.comfort_rooms
         comfort_max: 22.5

@@ -28,6 +28,20 @@ assert p3["setpoint_now"] == cfg.baseline and "comfort max" in p3["reason"], p3
 p4 = plan(rates, now, 20.0, cfg)
 assert p4["setpoint_now"] == cfg.boost and "comfort min" in p4["reason"], p4
 assert plan([], now, 21.0, cfg)["setpoint_now"] == cfg.baseline
+# --- boost cap (0.3.2): before ~16:00 Octopus has only published to 23:00, so the
+# cheapest third of what is left can be 29p (177, 15:30 12 Oct 2026) ------------------
+t1530 = dt.datetime(2026, 10, 15, 15, 30, tzinfo=tz)
+short = [(t1530 + dt.timedelta(minutes=30 * i), pr) for i, pr in       # 15:30-23:00, as seen at 15:30
+         enumerate([0.29] + [0.45] * 6 + [0.33] * 4 + [0.30] * 4)]
+pc = plan(short, t1530 + dt.timedelta(minutes=5), 21.0, cfg)
+assert pc["setpoint_now"] == cfg.boost, pc                 # uncapped: 29p ranks as cheap
+capped = PlannerConfig(max_boost_price=0.20)
+pc = plan(short, t1530 + dt.timedelta(minutes=5), 21.0, capped)
+assert pc["setpoint_now"] == capped.baseline and "20p boost cap" in pc["reason"], pc
+assert pc["threshold"] == 0.20 and not any(sl["cheap"] for sl in pc["slots"]), pc
+pc = plan(rates, dt.datetime(2026, 10, 15, 2, 0, tzinfo=tz), 21.0, capped)
+assert pc["setpoint_now"] == capped.boost and pc["reason"] == "cheap slot", pc   # 9p still boosts
+assert plan(short, t1530, 19.5, capped)["setpoint_now"] == capped.boost          # comfort beats the cap
 print("planner OK:", p["cheap_slots"], "cheap of", p["horizon_slots"], "slots; threshold £%.3f" % p["threshold"])
 
 # --- offline: no rates at all (Octopus unreachable, cache run out) --------------

@@ -189,7 +189,9 @@ does mean it has stopped.
 Deciding runs every 30 minutes. The slab takes hours to respond and prices change every
 half hour, so deciding faster gains nothing. Near its threshold the "cheapest third"
 rule could flip back and forth, each flip costing a write; a deadband and minimum dwell
-keep it to about two writes an hour.
+keep it to about two writes an hour. `max_boost_price` caps what counts as cheap: before
+Octopus publishes tomorrow (~16:00) the horizon ends at 23:00, and the cheapest third of
+that can still be dear.
 
 Reconciling runs every 5 minutes, because a lost write is what costs heat: a dropped
 boost stays wrong for 5 minutes instead of a whole slot. Reads are local and take

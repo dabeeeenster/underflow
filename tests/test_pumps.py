@@ -220,5 +220,15 @@ for warm, capped, zone in (("24.4", True, "off"), ("23.2", True, "off"), ("22.9"
 assert p.step.min_flow == 38
 assert any("block resumes" in m for _, m in a.logs), a.logs[-5:]
 
+# --- dwell: the tick a full dwell after a write moves on (0.3.2) -------------------------
+# 177 wrote 32 at 15:30:06 on 12 Oct 2026; at 16:00:05 it held "for another 0 min".
+a = app(two, states)
+p = a.pumps["177"]
+for since, moved in ((dt.timedelta(minutes=29, seconds=59), True), (dt.timedelta(minutes=20), False)):
+    p.desired, p.desired_since = 42.0, NOW - since
+    p.decide()
+    assert (p.desired != 42.0) is moved, (since, p.desired)
+assert any("(dwell)" in m for _, m in a.logs)
+
 print("ok: single-pump config unchanged, two pumps built and isolated, forbidden registers refused, "
       "a failing pump never stops the other, sliders routed, comfort on the coldest available room")

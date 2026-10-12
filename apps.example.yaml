@@ -13,6 +13,7 @@ underflow:
     baseline: 20        # °C, curve only
     boost: 32           # °C, min flow in cheap slots
     cheap_fraction: 0.33
+    max_boost_price: 0.20   # £/kWh: never boost above this, however a slot ranks
     horizon_hours: 24
     comfort_min: 20.5   # room mean below this -> boost regardless of price
     comfort_max: 22.5   # room mean above this -> baseline regardless of price

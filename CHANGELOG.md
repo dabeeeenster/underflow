@@ -5,6 +5,18 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.3.2 — 2026-10-12
+
+- Planner: `max_boost_price` (£/kWh, default none). A slot priced above it is never
+  boosted, however it ranks. The cheapest third is relative to what Octopus has
+  published, and before ~16:00 that ends at 23:00: at 15:30 on 12 Oct 2026 177 boosted a
+  29p slot because it was among the cheapest 5 of 15. The reason reads "cheap for the
+  horizon, but 29.2p is over the 20p boost cap"; the comfort floor still boosts.
+- Minimum dwell: a minute's slack. The decision tick a full dwell after a write saw
+  29:59, because a write lands a second or so into its tick, and held for another slot
+  ("holding 32 for another 0 min"): 177 stayed boosted through the 44.5p 16:00 slot on
+  12 Oct 2026.
+
 ## 0.3.1 — 2026-10-12
 
 - Step test: the ceiling guard no longer latches for the rest of a heat block. While the
