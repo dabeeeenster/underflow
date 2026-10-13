@@ -11,7 +11,10 @@ Fits, on the coldest-room series the controller actually keys on:
   * house  — slab + room RC model with solar gain (model.fit_house), heat input = the
              pump's heat output read off the bus while space heating (hot-water runs heat
              the cylinder, not the slab, so they count as zero); sun = PV kW (mean over
-             each 5 min); outside = Met Office.
+             each 5 min); outside = the house sensor (`--outside house`, the default:
+             the `outside_temp` column since 0.4.0, before that the lower of the two
+             Vaillant sensors, which is what sensor.outside_temp_house is), or the Met
+             Office's current reading (`--outside met`). Fit on the one the controller uses.
   * emitter — kW delivered per K of (flow − estimated slab), and the most it delivered.
   * COP    — Carnot fraction from heating rows only (model.fit_cop).
   * spread — mean warmest − coldest room.
@@ -61,12 +64,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("csv", nargs="+")
     ap.add_argument("--holdout-hours", type=float, default=6.0)
+    ap.add_argument("--outside", choices=("house", "met"), default="house")
     a = ap.parse_args()
     data = load(a.csv)
     ts = [t for t, _ in data]
     g = lambda k: np.array([num(r.get(k)) for _, r in data])
     room, warm = g("room_temp_mean"), g("warmest")
-    t_out = g("outside_temp_met_office")
+    met = g("outside_temp_met_office")
+    if a.outside == "met":
+        t_out = met
+    else:
+        # 0.4.0 logs the house reading as `outside_temp`; older rows have only the two
+        # Vaillant sensors, whose lower one is the same thing. Met Office where both are missing.
+        house = np.fmin(g("outside_temp_179_sensor"), g("outside_temp_177_sensor"))
+        t_out = np.where(np.isfinite(g("outside_temp")), g("outside_temp"), house)
+        t_out = np.where(np.isfinite(t_out), t_out, met)
     heat = np.where(np.array([r.get("mode") == "heating" for _, r in data]), g("heat_out_kw_bus"), 0.0)
     heat = np.nan_to_num(heat, nan=0.0)
     sun = np.nan_to_num(g("pv_w"), nan=0.0) / 1000.0
@@ -108,7 +120,7 @@ def main():
           file=sys.stderr)
 
     print("  model:")
-    print(f"    provisional: true   # fitted {dt.date.today()} on {ts[0]:%d %b %H:%M}-{ts[-1]:%d %b %H:%M}; "
+    print(f"    provisional: true   # fitted {dt.date.today()} on {ts[0]:%d %b %H:%M}-{ts[-1]:%d %b %H:%M}, outside={a.outside}; "
           f"rmse {info['rmse']:.2f} K, holdout {hold_rmse if hold_rmse is None else round(hold_rmse, 2)} K")
     print("    params:")
     for k, v in vars(p).items():

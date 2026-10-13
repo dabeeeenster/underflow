@@ -13,8 +13,12 @@ up at 07:00, or that a sunny afternoon will do the job for free.
 Method (greedy, deterministic): start every slot at the lowest level; simulate; at the
 first slot where the coldest room would fall below the floor, raise the one earlier slot
 that buys the most degrees at that moment per penny, re-simulate, repeat. A raise that
-would push the warmest room over the top is not allowed. If nothing earlier can fix a
-breach (the slab is too slow), the breach is recorded and planning moves on.
+would push the warmest room over the top before the breach is not allowed. Overshoot
+after it is not held against the raise: heat bought at 03:00 also lifts a sunny
+afternoon that is over the top anyway, and counting that blocked every night-time raise
+whenever sun was forecast (13 Oct 2026); the thermostat gate handles the afternoon. If
+nothing earlier can fix a breach (the slab is too slow), the breach is recorded and
+planning moves on.
 
 Pure: numpy, no HA.
 """
@@ -111,8 +115,9 @@ def plan(params: HouseParams, cfg: MpcConfig, slab0: float, room0: float,
                 trial = idx.copy(); trial[j] = up
                 ts2, tr2, q2, e2, c2 = run(trial)
                 gain = tr2[breach] - tr[breach]
-                # Don't push the warmest room over the top, or further over it if sun already has.
-                over2, over1 = tr2[1:] + cfg.spread - top, tr[1:] + cfg.spread - top
+                # Don't push the warmest room over the top, or further over it if sun already
+                # has, up to the breach being fixed (tr[k] is the room after slot k-1).
+                over2, over1 = tr2[1:breach + 1] + cfg.spread - top, tr[1:breach + 1] + cfg.spread - top
                 if gain <= 1e-4 or np.any((over2 > 1e-9) & (over2 > over1 + 1e-9)):
                     continue
                 score = max(c2 - cost, 1e-6) / gain

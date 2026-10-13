@@ -66,7 +66,7 @@ except Exception as exc:  # pragma: no cover
 
 # Bump on every release (see README, "Releases") and add a CHANGELOG.md entry. Published
 # on the status sensor so the dashboard shows which build is actually running.
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 # Site-wide keys a pump inherits unless its own entry says otherwise; dicts merge, so
 # a pump adds its own `entities` or `datalog.columns` to the shared ones. Everything else

@@ -296,6 +296,51 @@ with tempfile.TemporaryDirectory() as d:
     q = P.Pump(a, "179", cfg179, "test", True)
     assert q.gate_open is True and q.gate_setpoints == {e: 25.0 for e in TADOS}, (q.gate_open, q.gate_setpoints)
 
-print("ok: single-pump config unchanged, two pumps built and isolated, forbidden registers refused, "
+# --- the live model planner (0.5.0): its plan drives the pump, the price planner stands in -
+ZONE = "select.heating_ebusd179_ctlv2_z1opmode"
+mstates = dict(gstates, **{"sensor.179_coldest_room": "21.0", ZONE: "day",
+                           two["pumps"]["179"]["ebusd"]["signal_entity"]: {"state": "on", "last_changed": NOW - dt.timedelta(hours=1)}})
+a = app(two, mstates)
+p = a.pumps["179"]
+p.model_live, p.gate_dry_run, p.dry_run = True, False, False
+plans = {"off": {"state": "off", "level_now": "off", "predicted_min": 20.7},
+         "32": {"state": "32", "level_now": 32.0, "predicted_min": 20.9}}
+use = {"plan": plans["off"]}
+p._shadow_plan = lambda obs, now, rates: use["plan"]
+p.desired_since = NOW - dt.timedelta(hours=2)
+p.decide()
+attrs = a.published["sensor.underflow_179"][1]
+assert p.source == "model" and p.heat_off and p.desired == 20.0, (p.source, p.heat_off, p.desired)
+assert p.zone_desired == "off" and p.gate_open is False and "model planner" in p.gate_reason, (p.zone_desired, p.gate_reason)
+assert attrs["heat_off"] == "true" and attrs["model_live"] == "true"
+assert any(kw.get("variables") == {"mode": "off"} for s, kw in a.calls if s == "script/turn_on"), a.calls
+assert "model planner has the heating off" in a.published["sensor.underflow_179_whats_going_on"][1]["text"]
+# it wants heat: level written, zone back on, thermostats on after the gate's dwell
+a.states[ZONE] = "off"
+use["plan"] = plans["32"]
+p.desired_since, p.gate_since, p._zone_last_write = NOW - dt.timedelta(hours=1), NOW - dt.timedelta(hours=1), None
+p.decide()
+assert p.desired == 32.0 and not p.heat_off and p.zone_desired == "day" and p.gate_open is True, (p.desired, p.zone_desired)
+assert "set the minimum flow to 32" in a.published["sensor.underflow_179_whats_going_on"][1]["text"]
+# no plan this tick: the price planner stands in, and says why; the zone goes back on
+use["plan"] = None
+p.desired_since = NOW - dt.timedelta(hours=1)
+p.decide()
+assert p.source == "planner" and "model planner unavailable" in p.source_reason and not p.heat_off, p.source_reason
+assert "price planner is standing in" in a.published["sensor.underflow_179_whats_going_on"][1]["text"]
+# a running step test still wins
+use["plan"] = plans["off"]
+p.test_cfg = p._base_test_cfg = TP.TestConfig.from_args({"enabled": True, "start": (NOW - dt.timedelta(hours=1)).isoformat(),
+                                      "blocks": [[3, 38]]})
+p.decide()
+assert p.source == "test" and not p.heat_off and p.zone_desired == "day", (p.source, p.zone_desired)
+# shadow pumps never act on it
+q = app(two, mstates).pumps["179"]
+q._shadow_plan = lambda obs, now, rates: plans["off"]
+q.decide()
+assert q.source == "planner" and not q.heat_off
+
+print("ok: model planner live drives level, zone and thermostats, falls back to the price planner; "
+      "single-pump config unchanged, two pumps built and isolated, forbidden registers refused, "
       "a failing pump never stops the other, sliders routed, comfort on the coldest available room, "
       "thermostat gate decides, writes, holds and restores")

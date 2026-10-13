@@ -43,12 +43,20 @@ Kalman filter tracks that state at run time.
 `COP = η · T_flow / (T_flow − T_out)` in kelvin, with `η` fitted from measured electrical
 and heat power. Heat into the slab is `k · (T_flow − T_slab)`.
 
-**Optimiser.** For each half-hour, pick a minimum flow from a few levels (say 20, 25,
-30, 35, 40 °C) to minimise `Σ price × Q / COP`, keeping predicted room temperature in a
-comfort band and flow under the screed's limit. 48 slots by 5 levels is a dynamic
-programme over slab temperature that runs in under a second in numpy. The model is
-refitted weekly on a rolling window; if the fit gets worse, the controller falls back to
-simple rules.
+**Model planner** (`mpc.py`). For each half-hour of the next 24, pick zone off or a
+minimum flow from a few levels (20, 25, 32, 38, 42 °C) so the coldest room stays above the
+comfort floor for the least `Σ price × Q / COP`. It is greedy: start with everything off,
+simulate the house against the weather and sun forecasts, and at the first slot where the
+coldest room would fall below the floor, raise the earlier slot that buys the most degrees
+at that moment per penny; repeat. A raise may not push the warmest room over the top
+before that moment. Because the slab carries heat for hours, this banks cheap night heat
+for the morning and skips heat a sunny afternoon will supply.
+
+With `model.live: true` (0.5.0) its plan for the slot now drives the pump: a level is
+written as the minimum flow, "off" turns the zone and the room thermostats off. Without a
+plan (no fit, a failed tick) the rule-based price planner stands in. The comfort band binds
+on both. Without `live` the plan is only published (`sensor.underflow_model_plan`), a
+shadow to compare against what happened. Refit with `tools/fit_log.py` as data comes in.
 
 Room thermostats are set a couple of degrees above target with no schedule, so every
 loop stays open and the flow temperature controls the heat, as Havenwise does. They are
@@ -70,7 +78,7 @@ drifts, and an `input_boolean` turns the gate off from the dashboard.
 | 1 | Agile rules (`planner.py`): raise min flow in the cheapest third of upcoming slots, baseline otherwise; the comfort band overrides | running in dry run, publishing `sensor.underflow_planned_min_flow`; goes live Oct 2026 |
 | 1b | Reliable writes (`reconcile.py`, `ebusd.py`): hold a target, check it against the bus every 5 min, write only if it differs | running in dry run since Sep 2026 |
 | 1s | Shadows: publish what two other demand sources would ask for, never written. `sensor.underflow_shadow_mirror` copies the neighbouring controller's min flow; `sensor.underflow_shadow_shared` (`shared.py`) steers by the room sensor that controller uses, with this half's own rooms as limits both ways | added Oct 2026, for a week's comparison before choosing a demand source |
-| 2 | House and COP models (`model.py`): 2R2C fit, Kalman filter, Carnot-fraction COP | tested on synthetic data; a real fit needs a month of heating data (Nov 2026) |
+| 2 | House and COP models (`model.py`): 2R2C fit, Kalman filter, Carnot-fraction COP; model planner (`mpc.py`) | fitted on a 4-day step test (10-14 Oct 2026); planner shadowed from 11 Oct, live on 179 from 13 Oct 2026 (0.5.0) |
 | 3 | Optimise min flow per half-hour (dynamic programme over slab temperature) | Dec 2026 |
 
 ## Files
@@ -82,7 +90,7 @@ drifts, and an `input_boolean` turns the gate off from the dashboard.
 | `planner.py` | Stage 1 rules. Pure functions, no HA |
 | `ebusd.py` | Client for ebusd's TCP command port (see below) |
 | `reconcile.py` | Given a target, a fresh reading and the link state, decide whether to write. Pure |
-| `demand.py` | Where the target comes from: a neighbouring controller (mirror) or the local planner. Pure |
+| `demand.py` | Where the target comes from: the live model planner, a neighbouring controller (mirror) or the local price planner. Pure |
 | `shared.py` | Shadow demand source: steer by the neighbour's room sensor in small capped steps, limited both ways by this half's room mean. Pure |
 | `probe.py` | Is each device still on the bus? Uses ebusd's `lastup`, adds no bus traffic. Pure |
 | `hasafe.py` | Stops AppDaemon dropping zero and `False` attributes on the way to HA |
@@ -106,12 +114,12 @@ Tests are standalone scripts: `uv run tests/<name>.py` (`test_model.py` also nee
 | `test_planner.py` | Planner rules on a synthetic Agile day |
 | `test_ebusd.py` | Reply parsing, the `-f` flag, a dead bus returns a `Reading` instead of raising |
 | `test_reconcile.py` | An unreadable bus never causes a write; backoff slows but never stops; alerts fire on duration |
-| `test_forecast_mpc.py` | Forecast parsing and offline fallback; model planner keeps the room above the floor, banks heat in cheap slots, heats less with sun, nothing for a warm house, deterministic; shadow filter and plan output |
+| `test_forecast_mpc.py` | Forecast parsing and offline fallback; model planner keeps the room above the floor, banks heat in cheap slots, heats less with sun, nothing for a warm house, a sunny afternoon over the top doesn't block night heat (13 Oct 2026), deterministic; shadow filter and plan output |
 | `test_persist.py` | Saved state round-trips; a tripped step-test guard stays tripped across a restart; stale, corrupt or foreign state files are ignored |
 | `test_targets.py` | HA slider values override the comfort band and test guards; out-of-range, unparsable or upside-down values fall back to apps.yaml |
 | `test_testplan.py` | Step-test blocks start and end on schedule, "off" asks for the zone off, the floor guard trips and latches, the ceiling pauses a heat block and lets it resume 0.5 K under; the CSV log keeps one header per file |
 | `test_gate.py` | The thermostat gate closes at the comfort top and reopens 0.3 K under it, opens to boost or at the floor, follows a step test, fails open, and holds non-urgent changes for the dwell |
-| `test_demand.py` | Mirror held through a dropout, dropped when stale; caps and comfort band apply |
+| `test_demand.py` | Model planner's level or heat off, comfort band binding on it; mirror held through a dropout, dropped when stale; caps and comfort band apply |
 | `test_shared.py` | Deadband, one step per tick, floor and cap, this half's rooms override the shared sensor |
 | `test_probe.py` | A steady value stays alive; blips are debounced; a missing device is found |
 | `test_pumps.py` | A one-pump apps.yaml works as before; two pumps get their own config plus the inherited site keys, nothing leaking; a pump pointed at a forbidden register is refused while the other starts; a pump that raises never stops the other; a slider re-decides its own pump only; comfort on the coldest available room; the thermostat gate decides, writes over HomeKit with the remembered setpoint, holds in flight, respects its switch and survives a restart; the house outside temperature with the Met Office fallback |

@@ -95,6 +95,7 @@ underflow:
         enable_entity: input_boolean.underflow_179_thermostat_gate
         dry_run: true          # watch first; the pump itself is live
       model:
+        live: false            # true: the plan drives the pump (0.5.0); false: shadow only
         provisional: true
         top: 23.5
         allow_off: true

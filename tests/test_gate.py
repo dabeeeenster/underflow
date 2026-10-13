@@ -50,6 +50,12 @@ assert w(False, 22.9, step=heat).open is True       # the test ignores the comfo
 assert w(True, 21.0, step=paused).open is False
 assert w(True, 21.0, step=Step(False)).open is True  # inactive step = planner rules
 
+# the live model planner's "heat off" closes them; the comfort floor still wins (0.5.0)
+d = G.wanted(cfg, True, 21.0, 20.0, 20.0, 20.0, 22.0, heat_off=True)
+assert d.open is False and "model planner" in d.reason and not d.urgent, d
+assert G.wanted(cfg, False, 19.9, 20.0, 20.0, 20.0, 22.0, heat_off=True).open is True
+assert G.wanted(cfg, True, 21.0, 20.0, 20.0, 20.0, 22.0, step=heat, heat_off=True).open is True
+
 # dwell: a non-urgent change waits out min_dwell_minutes (with a minute's slack)
 now = dt.datetime(2026, 10, 14, 19, 0, 5, tzinfo=dt.timezone(dt.timedelta(hours=1)))
 close = w(True, 22.2)

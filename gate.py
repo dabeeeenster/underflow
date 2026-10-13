@@ -12,6 +12,8 @@ it does. Their setpoints are left alone: open, each Tado still caps its own room
 
   * step test running   -> follow it: open in a heat block, closed when the block is off
                            or paused at the ceiling
+  * comfort floor       -> open
+  * model planner off   -> closed (0.5.0: the live model planner has heat off this slot)
   * boosting            -> open (a cheap slot, or the comfort floor)
   * no room reading     -> open (fail towards heat, as the Tados alone would)
   * room at comfort_max -> closed, and stays closed until it is `hysteresis` under it
@@ -61,16 +63,20 @@ class GateDecision:
 
 
 def wanted(cfg: GateConfig, prev_open: bool | None, room: float | None, setpoint: float | None,
-           baseline: float, comfort_min: float, comfort_max: float, step=None) -> GateDecision:
+           baseline: float, comfort_min: float, comfort_max: float, step=None,
+           heat_off: bool = False) -> GateDecision:
     """Should the thermostats be calling? `prev_open` is the gate's current position
     (None before the first decision); `setpoint` the minimum flow underflow is asking for;
-    `step` the step test's `Step` (testplan.py), or None."""
+    `step` the step test's `Step` (testplan.py), or None; `heat_off` True when the live
+    model planner wants no heat this slot."""
     if step is not None and getattr(step, "active", False):
         if step.zone == "off":
             return GateDecision(False, "the step test has heat off", True)
         return GateDecision(True, "the step test is heating", True)
     if room is not None and room <= comfort_min:
         return GateDecision(True, f"room {room:.1f} °C at/below the {comfort_min:g} °C comfort floor", True)
+    if heat_off:
+        return GateDecision(False, "the model planner has heat off")
     if setpoint is not None and setpoint > baseline:
         return GateDecision(True, f"boosting to {setpoint:g} °C")
     if room is None:

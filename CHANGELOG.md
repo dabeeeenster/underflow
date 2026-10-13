@@ -5,6 +5,34 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.5.0 — 2026-10-13
+
+- **Model planner live** (`model.live: true`): the stage-2 model planner's plan for the
+  slot now drives the pump instead of the price planner. A level is written as the
+  minimum flow; "off" is a true off, as in the step test: the zone goes off, the room
+  thermostats go off through the gate (`heat_off`), and the register is held at the
+  baseline. Any other level puts a zone this pump switched off back on, after a restart
+  too. The comfort band binds as on every source: off at the floor becomes a boost, a boost
+  at the top is cut to the baseline. With no usable plan (no fit, a failed tick) the price
+  planner stands in and the reason says so. A running step test still overrides it.
+  Without `live` the model planner stays a shadow, as before.
+  - Status and plan attributes `model_live` and `heat_off`; demand source `model`; the
+    narrative says what the model planner is doing, or that the price planner is standing in.
+  - The plan is computed before the decision now, not after it.
+- **Planner fix** (`mpc.py`): a raise is no longer refused for lifting the warmest room
+  over the top *after* the breach it fixes. With a sunny afternoon forecast over the top,
+  any night heat also lifted that peak, so every raise was refused: at 21:25 on 13 Oct
+  2026 the refitted 179 model planned no heat and let the coldest room fall to 19.8 °C by
+  07:30. The thermostat gate handles the afternoon.
+- **`tools/fit_log.py --outside house|met`** (default `house`): fit on the outside
+  temperature the controller uses since 0.4.0, the `outside_temp` column, or for older
+  rows the lower of the two Vaillant sensors. 179 refitted on 10-13 Oct 2026 (81 h): a
+  rolling backtest (filter to each hour, then forecast) gives 0.28 / 0.26 / 0.28 K error
+  at 3 / 6 / 12 h with no bias, against 0.53 / 0.72 / 0.95 K and a cold bias for the
+  11 Oct fit.
+- Deployed 13 Oct 2026 with the step test ended a day early: its ceiling had paused every
+  heat block since 11:00 that day.
+
 ## 0.4.0 — 2026-10-13
 
 - **Thermostat gate** (`gate:`, `gate.py`): underflow switches a pump's room thermostats

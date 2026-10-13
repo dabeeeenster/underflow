@@ -20,7 +20,7 @@ from narrative import describe, summary
 from hasafe import ha_safe
 from ebusd import MAX_CLOCK_SKEW, Ebusd
 from reconcile import ReconcileConfig, RegisterState, decide
-from demand import Held, MirrorConfig, choose, hold
+from demand import Held, MirrorConfig, choose, from_model, hold
 from shared import SharedConfig, shared_step
 from testplan import TestConfig, Step, test_step, current_block
 import gate as G
@@ -193,9 +193,13 @@ class Pump:
         self.log_bus = dict(lc.get("bus", {}) or {})
         self._last_log = None
 
-        # --- stage-2 model planner, shadow only (shadow.py): plans and publishes, never
-        # writes. Needs fitted parameters under `model.params`; without them it says so.
+        # --- stage-2 model planner (shadow.py): plans and publishes every decide tick.
+        # Needs fitted parameters under `model.params`; without them it says so. With
+        # `model.live` (0.5.0) its plan drives the pump, the price planner standing in
+        # whenever it has none; otherwise it is a shadow and never writes.
         mc = cfg.get("model", {}) or {}
+        self.model_live = bool(mc.get("live", False))
+        self.heat_off = False          # the live model planner wants no heat this slot
         self.model_entity = mc.get("entity", self.status_entity + "_model_plan")
         self.model_forecast = dict(mc.get("forecast", {}) or {})
         try:
@@ -376,16 +380,38 @@ class Pump:
         now = self.datetime(aware=True)
         rates = self._rates()
         result = plan(rates, now, obs.get("room_temp_mean"), self.planner_cfg)
+        model_out = self._shadow_plan(obs, now, rates)
 
         proposed, source, reason = choose(self.held, result["setpoint_now"],
                                           obs.get("room_temp_mean"), self.planner_cfg,
                                           self.mirror_cfg, now)
 
+        # The live model planner beats the price planner; without a plan this tick it
+        # falls back to it, and says so.
+        self.heat_off = False
+        if self.model_live:
+            m = from_model(model_out, obs.get("room_temp_mean"), self.planner_cfg)
+            if m is not None:
+                proposed, self.heat_off, reason = m
+                source = "model"
+            else:
+                why = "no fitted parameters" if self.shadow is None else "no plan this tick"
+                reason = f"model planner unavailable ({why}), so the price planner: {reason}"
+
         # A running step test overrides everything above, price included.
         self._update_step(obs, now)
         if self.step.active:
             proposed, source, reason = self.step.min_flow, "test", self.step.reason
+            self.heat_off = False                # the test drives the zone itself
             result = dict(result, urgent=True)   # block edges must not wait out the dwell
+        elif self.model_live and self.zone_entity:
+            # Heat off is a true off: zone off, as in the step test. Anything else puts a
+            # zone this pump switched off back on (also after a restart, when only the
+            # zone's state says so).
+            if self.heat_off:
+                self.zone_desired = self.zone_off
+            elif self.get_state(self.zone_entity) == self.zone_off:
+                self.zone_desired = self.zone_on
         self.source, self.source_reason = source, reason
 
         # Deadband and minimum dwell: a "cheapest third" rule near its threshold flips as
@@ -406,7 +432,6 @@ class Pump:
 
         self._publish_plan(result, obs, now)
         self._publish_shadows(result, obs, now)
-        self._shadow_plan(obs, now, rates)
         self._reconcile(obs, now)
 
     def _rates(self):
@@ -433,6 +458,8 @@ class Pump:
                 "mirror_age_minutes": (round(self.held.age(now) / 60, 1)
                                        if self.held.age(now) is not None else None),
                 "dry_run": self.dry_run,
+                "model_live": self.model_live,
+                "heat_off": self.heat_off,
                 "cheap_threshold_gbp_kwh": result.get("threshold"),
                 "cheap_slots": result.get("cheap_slots"),
                 "horizon_slots": result.get("horizon_slots"),
@@ -447,9 +474,12 @@ class Pump:
                 if self.step.active else None)
         gate = ({"open": self.gate_open, "reason": self.gate_reason, "dry_run": self.gate_dry_run,
                  "enabled": self._gate_enabled()} if self.gate_cfg is not None else None)
+        model = ({"used": self.source == "model", "heat_off": self.heat_off,
+                  "setpoint": self.desired, "reason": self.source_reason}
+                 if self.model_live else None)
         lines = describe(obs, result, now, cfg, self.dry_run, test=test,
                          room_label=self.args.get("room_label", "the house"),
-                         notes=self.args.get("notes"), gate=gate)
+                         notes=self.args.get("notes"), gate=gate, model=model)
         self._publish(
             self.narrative_entity,
             summary(lines),
@@ -552,7 +582,7 @@ class Pump:
             return
         c = self.planner_cfg
         d = G.wanted(self.gate_cfg, self.gate_open, obs.get("room_temp_mean"), self.desired,
-                     c.baseline, c.comfort_min, c.comfort_max, self.step)
+                     c.baseline, c.comfort_min, c.comfort_max, self.step, heat_off=self.heat_off)
         if d.open == self.gate_open:
             self.gate_reason = d.reason
         elif G.may_change(self.gate_cfg, d, self.gate_open, self.gate_since, now, self.dwell_slack):
@@ -740,7 +770,7 @@ class Pump:
         self.log(f"restored state saved {age:.0f} min ago: {', '.join(restored) or 'nothing to restore'}")
         return doc["saved_at"]
 
-    # ---- stage-2 model planner (shadow) ---------------------------------
+    # ---- stage-2 model planner (shadow, or live with model.live) -----------
     def _shadow_observe(self, obs, now):
         if not self.shadow or not self._last_row:
             return
@@ -760,12 +790,14 @@ class Pump:
             self.log(f"model observe failed: {exc!r}", level="WARNING")
 
     def _shadow_plan(self, obs, now, rates):
+        """Plan, publish, and return this tick's plan (None if there is none)."""
+        role = "live" if self.model_live else "shadow"
         if not self.shadow:
             if self.args.get("model"):
                 self._publish(self.model_entity, "waiting", {
-                    "friendly_name": f"{self.label} model planner (shadow)", "icon": "mdi:brain",
+                    "friendly_name": f"{self.label} model planner ({role})", "icon": "mdi:brain",
                     "reason": "no fitted parameters yet (model.params)"})
-            return
+            return None
         try:
             met, sol = self.app.forecasts(self.model_forecast.get("weather"),
                                           self.model_forecast.get("solcast", []))
@@ -775,8 +807,9 @@ class Pump:
             self._last_shadow = out
             state = out.pop("state")
             self._publish(self.model_entity, state, {
-                "friendly_name": f"{self.label} model planner (shadow)", "icon": "mdi:brain",
-                "shadow": True, "updated": now.isoformat(timespec="seconds"),
+                "friendly_name": f"{self.label} model planner ({role})", "icon": "mdi:brain",
+                "shadow": not self.model_live, "live": self.model_live,
+                "updated": now.isoformat(timespec="seconds"),
                 "floor": self.planner_cfg.comfort_min, "top": self.shadow.cfg.top, **out})
             out["state"] = state
             for key, label in (("predicted_coldest_3h", "predicted coldest room in 3 h"),
@@ -786,11 +819,13 @@ class Pump:
                         "friendly_name": f"{self.label} model: {label}", "unit_of_measurement": "°C",
                         "device_class": "temperature", "state_class": "measurement",
                         "icon": "mdi:brain"})
-            self.log(f"model (shadow): {state} now; coldest in 3 h {out.get('predicted_coldest_3h')} °C; "
+            self.log(f"model ({role}): {state} now; coldest in 3 h {out.get('predicted_coldest_3h')} °C; "
                      f"24 h {out.get('elec_kwh_24h')} kWh £{out.get('cost_24h_gbp')}"
                      + (f"; {'; '.join(out['notes'])}" if out.get("notes") else ""))
+            return out
         except Exception as exc:
             self.log(f"model plan failed: {exc!r}", level="WARNING")
+            return None
 
     # ---- reconcile: make the register match ----------------------------
     def reconcile(self):
@@ -830,6 +865,8 @@ class Pump:
             "zone_desired": self.zone_desired,
             "zone_action": zone_action,
             "test_active": self.step.active,
+            "model_live": self.model_live,
+            "heat_off": self.heat_off,
             "state_restored_from": self.restored.isoformat(timespec="minutes") if self.restored else None,
             "comfort_min": self.planner_cfg.comfort_min,
             "comfort_max": self.planner_cfg.comfort_max,

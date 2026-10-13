@@ -51,12 +51,14 @@ def _dur(a: dt.datetime, b: dt.datetime):
 
 def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage: str = "1",
              test: dict | None = None, room_label: str = "the house",
-             notes: list[str] | None = None, gate: dict | None = None) -> list[str]:
+             notes: list[str] | None = None, gate: dict | None = None,
+             model: dict | None = None) -> list[str]:
     """`test`: {"reason": ..., "ends": datetime} while a step test is in charge (it replaces
     the plan line). `room_label` names what `room_temp_mean` actually is. `notes` are the
     pump's own standing lines from config (what it is in the middle of), added before the
     stage line. `gate`: {"open", "reason", "dry_run", "enabled"} when the pump switches its
-    room thermostats (gate.py)."""
+    room thermostats (gate.py). `model`: {"used", "heat_off", "setpoint", "reason"} when the
+    model planner is live (0.5.0); while it is in charge it replaces the plan line."""
     lines = []
 
     # --- house and weather
@@ -107,6 +109,15 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
         ends = test.get("ends")
         until = f" until {_fmt_t(ends, now)}" if ends else ""
         lines.append(f"Step test in charge{until}, price ignored: {test.get('reason')}.")
+    elif model and model.get("used"):
+        verb = "would" if dry_run else "will"
+        if model.get("heat_off"):
+            lines.append(f"The model planner has the heating off: zone and room thermostats off, nothing circulating ({model.get('reason')}).")
+        else:
+            msp = model.get("setpoint")
+            action = (f"leave the minimum flow at {msp:g} °C so the heating curve decides" if msp is not None and msp <= cfg.baseline
+                      else f"set the minimum flow to {msp:g} °C")
+            lines.append(f"The model planner {verb} {action} ({model.get('reason')}).")
     elif sp is not None:
         if sp <= cfg.baseline:
             action = f"leave the minimum flow temperature at {sp:g} °C so the heating curve alone decides"
@@ -132,6 +143,10 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
     lines.extend(n for n in (notes or []) if n)
     if test:
         lines.append("Stage 2: fixed blocks of heat and no heat, to fit the house model (lag, slab, sun). The planner resumes when the test ends.")
+    elif model:
+        fallback = "" if model.get("used") else " It has no plan right now, so the rule-based price planner is standing in."
+        lines.append("Stage 2: the model planner is in charge. It simulates the slab and rooms against the weather, sun and price "
+                     "forecasts and buys the cheapest heat that keeps the coldest room above the floor." + fallback)
     else:
         lines.append(f"Stage {stage}: rule-based Agile shifting. The house and COP models are not yet fitted; the 5-minute log is collecting the data.")
     return lines
