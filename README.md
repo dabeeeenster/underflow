@@ -94,6 +94,7 @@ drifts, and an `input_boolean` turns the gate off from the dashboard.
 | `shared.py` | Shadow demand source: steer by the neighbour's room sensor in small capped steps, limited both ways by this half's room mean. Pure |
 | `probe.py` | Is each device still on the bus? Uses ebusd's `lastup`, adds no bus traffic. Pure |
 | `hasafe.py` | Stops AppDaemon dropping zero and `False` attributes on the way to HA |
+| `rooms.py` | The comfort rooms: coldest and warmest, with a room that drops out estimated from the others at its usual offset. Pure |
 | `gate.py` | When the room thermostats should be allowed to call: off at the comfort top, on to boost or heat, following a step test. Pure |
 | `narrative.py` | Plain-English status bullets, published as `sensor.underflow_whats_going_on` for a markdown card |
 | `model.py` | Stage 2: `HouseModel`, `fit_house`, `KalmanFilter`, `CopModel`, `fit_cop`, `flow_target` |
@@ -118,6 +119,7 @@ Tests are standalone scripts: `uv run tests/<name>.py` (`test_model.py` also nee
 | `test_persist.py` | Saved state round-trips; a tripped step-test guard stays tripped across a restart; stale, corrupt or foreign state files are ignored |
 | `test_targets.py` | HA slider values override the comfort band and test guards; out-of-range, unparsable or upside-down values fall back to apps.yaml |
 | `test_testplan.py` | Step-test blocks start and end on schedule, "off" asks for the zone off, the floor guard trips and latches, the ceiling pauses a heat block and lets it resume 0.5 K under; the CSV log keeps one header per file |
+| `test_rooms.py` | A missing room is estimated at its offsets, follows the others, holds steady when a second drops, is left out after 12 h, gives nothing when nothing reports, and survives a restart |
 | `test_gate.py` | The thermostat gate closes at the comfort top and reopens 0.3 K under it, opens to boost or at the floor, follows a step test, fails open, and holds non-urgent changes for the dwell |
 | `test_demand.py` | Model planner's level or heat off, comfort band binding on it; mirror held through a dropout, dropped when stale; caps and comfort band apply |
 | `test_shared.py` | Deadband, one step per tick, floor and cap, this half's rooms override the shared sensor |
@@ -275,9 +277,13 @@ Per pump:
   its declared `write_register` or its zone points at a match. Use it where a circuit must
   never be written, such as a cooling circuit. The refused pump's status sensor reads
   `refused`, and an alert says why.
-- `entities.comfort_rooms: [...]` judges comfort on the coldest of these rooms, worked out
-  in the app and skipping any that are unavailable. It's an alternative to a
-  `room_mean` sensor. Rooms you only want logged go in `datalog.columns`.
+- `entities.comfort_rooms` (a list of entities, or `{name: entity}`) judges comfort on the
+  coldest of these rooms, and a step-test ceiling on the warmest, worked out in the app.
+  It's an alternative to a `room_mean` sensor. A room that drops out is estimated from the
+  others at its usual offset from each (`rooms.py`, 0.6.0) for up to
+  `rooms.estimate_hours` (default 12), then left out; after `rooms.alert_minutes` (default
+  30) offline there is an alert, dismissed when it reports again. Rooms you only want
+  logged go in `datalog.columns`.
 - `zone.mode_on` / `zone.mode_off` are what the zone select calls on and off (default
   `day` / `off`).
 - `entities.outside_sensors: {name: entity}` lists outside sensors to log as

@@ -27,6 +27,7 @@ import gate as G
 import persist
 import targets
 import shadow as SH
+import rooms as R
 import datalog
 
 
@@ -136,9 +137,15 @@ class Pump:
                 if self.entities.get(k):
                     self.outside_sensors[k.split("_", 1)[1]] = self.entities[k]
         # The room the comfort band is judged on: an HA sensor (`room_mean`), or the
-        # coldest of `comfort_rooms`, worked out here and skipping any that are
-        # unavailable. Rooms only logged (a flaky sensor, a cold spare room) stay out.
-        self.comfort_rooms = list(self.entities.get("comfort_rooms", []) or [])
+        # coldest of `comfort_rooms` (a list, or {name: entity}), worked out here. A room
+        # that drops out is estimated from the others for a while rather than ignored
+        # (rooms.py, 0.6.0; `rooms:` tunes it). Rooms only logged (a flaky sensor, a cold
+        # spare room) stay out.
+        cr = self.entities.get("comfort_rooms") or []
+        self.room_tracker = R.Rooms(R.RoomsConfig.from_args(cr, cfg.get("rooms"))) if cr else None
+        self.room_reading = None
+        self._room_alerts = {}        # name -> "estimated" / "dropped": what we last alerted
+        self._rooms_since = None
 
         # --- stage-2 step tests: a fixed schedule of min-flow / zone-off blocks that
         # replaces the planner while it runs. See testplan.py.
@@ -305,18 +312,61 @@ class Pump:
     def _comfort_room(self):
         if self.entities.get("room_mean"):
             return self._num(self.entities["room_mean"])
-        vals = [v for v in (self._num(e) for e in self.comfort_rooms) if v is not None]
-        return min(vals) if vals else None
+        return self.room_reading.coldest if self.room_reading else None
 
     def _warmest_room(self):
         if self.entities.get("warmest_room"):
             return self._num(self.entities["warmest_room"])
-        vals = [v for v in (self._num(e) for e in self.comfort_rooms) if v is not None]
-        return max(vals) if vals else None
+        return self.room_reading.warmest if self.room_reading else None
+
+    def _update_rooms(self, now):
+        """Read the comfort rooms once per observation, estimating any that dropped out,
+        and alert once when one has been missing `alert_minutes`, and again if it is
+        given up on."""
+        if self.room_tracker is None:
+            return
+        cfg = self.room_tracker.cfg
+        r = self.room_reading = self.room_tracker.update(now, {n: self._num(e) for n, e in cfg.rooms})
+        self._rooms_since = self._rooms_since or now
+        for n, mins in r.missing.items():
+            state = "dropped" if n in r.dropped else "estimated"
+            # A room not seen since start counts from the start: after an HA restart the
+            # thermostats can be unavailable for a minute while HomeKit reconnects.
+            waited = mins if mins is not None else (now - self._rooms_since).total_seconds() / 60
+            if waited < cfg.alert_minutes:
+                continue
+            if self._room_alerts.get(n) == state:
+                continue
+            self._room_alerts[n] = state
+            if state == "estimated":
+                msg = (f"{n}'s room sensor has been unavailable for {mins} min. underflow is estimating it "
+                       f"at {r.estimated[n]:.1f} °C from the other rooms (its usual offset from them), "
+                       f"for up to {cfg.estimate_hours:g} h.")
+            elif mins is None:
+                msg = f"{n}'s room sensor hasn't reported since underflow started; comfort is judged without it."
+            else:
+                msg = (f"{n}'s room sensor has been unavailable for {mins / 60:.1f} h"
+                       + (f", past the {cfg.estimate_hours:g} h estimate" if mins >= cfg.estimate_hours * 60
+                          else " and no other room is reporting to estimate it from")
+                       + "; comfort is judged without it.")
+            self._room_alert(n, msg)
+        for n in [n for n in self._room_alerts if n not in r.missing]:
+            self.log(f"room {n} reporting again ({r.values.get(n)} °C)")
+            del self._room_alerts[n]
+            self.call_service("persistent_notification/dismiss", notification_id=self._room_alert_id(n))
+
+    def _room_alert_id(self, room):
+        who = f"{self.name}_" if self.name else ""
+        return f"underflow_{who}room_" + "".join(c if c.isalnum() else "_" for c in room.lower())
+
+    def _room_alert(self, room, message):
+        who = f"{self.name} " if self.name else ""
+        self.app.alert(f"underflow {who}room sensor offline", message, self._room_alert_id(room))
 
     # ---- observe -------------------------------------------------------
     def _observe(self):
         e = self.entities
+        self._update_rooms(self.datetime(aware=True))
         obs = {"outside_temp_met_office": self._num(e.get("weather"), "temperature")}
         for n, ent in self.outside_sensors.items():
             obs[f"outside_temp_{n}_sensor"] = self._num(ent)
@@ -340,6 +390,12 @@ class Pump:
             "agile_rate_now": self._num(e.get("agile_rate")),
             "pump_status": self.get_state(e["pump_status"]) if e.get("pump_status") else None,
         })
+        if self.room_reading is not None:
+            rr = self.room_reading
+            obs["rooms"] = rr.values
+            obs["rooms_estimated"] = rr.estimated or None
+            obs["rooms_missing_minutes"] = rr.missing or None
+            obs["rooms_dropped"] = rr.dropped or None
         obs["mode"] = self._mode(obs["pump_status"])
         pin, pout = obs["power_in_kw"], obs["power_out_kw"]
         obs["cop_now"] = round(pout / pin, 2) if pin and pout and pin > 0.2 else None
@@ -482,6 +538,7 @@ class Pump:
                   "setpoint": self.desired, "reason": self.source_reason}
                  if self.model_live else None)
         lines = describe(obs, result, now, cfg, self.dry_run, test=test,
+                         rooms=self.room_reading,
                          room_label=self.args.get("room_label", "the house"),
                          notes=self.args.get("notes"), gate=gate, model=model)
         self._publish(
@@ -689,6 +746,7 @@ class Pump:
                 "test_guarded": self.step.guarded if self.step.active else None,
                 "test_capped": self.step.capped if self.step.active else None,
                 "dry_run": self.dry_run,
+                "rooms_estimated": ";".join(self.room_reading.estimated) if self.room_reading and self.room_reading.estimated else None,
             })
             if self.gate_cfg is not None:
                 row["gate_open"] = self.gate_open
@@ -715,6 +773,8 @@ class Pump:
             if self.gate_cfg is not None:
                 st["gate"] = {"open": self.gate_open, "since": self.gate_since,
                               "setpoints": self.gate_setpoints}
+            if self.room_tracker is not None:
+                st["rooms"] = self.room_tracker.dump()
             if self.shadow is not None:
                 kf, c = self.shadow.kf, self.shadow.cache
                 st["kf"] = None if kf.x is None else {"x": kf.x.tolist(), "P": kf.P.tolist(),
@@ -754,6 +814,9 @@ class Pump:
                                        if k in self.gate_cfg.climates}
                 if self.gate_open is not None:
                     restored.append(f"thermostats {'on' if self.gate_open else 'off'}")
+            if self.room_tracker is not None and doc.get("rooms"):
+                self.room_tracker.load(doc["rooms"])
+                restored.append("room offsets")
             kf = doc.get("kf")
             at = persist._dt(kf.get("at")) if kf else None
             if self.shadow is not None and kf and at and (now - at).total_seconds() < 3600:

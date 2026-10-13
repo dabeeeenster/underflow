@@ -5,6 +5,28 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.6.0 — 2026-10-13
+
+- **Carry on when a room sensor drops out** (`rooms.py`). With `entities.comfort_rooms`, a
+  room that stops reporting is estimated from the rooms still reporting, at its last
+  offset from each of them, instead of being ignored. On 179 the Living Room is the
+  coldest room 71% of the time and the next coldest reads a median 0.5 K warmer, so
+  ignoring a lost Living Tado made the house look warmer and the planner heat less.
+  - The estimate follows the other rooms as the house warms or cools. Offsets are
+    pairwise, so it doesn't jump when a second room drops out too.
+  - It is kept for `rooms.estimate_hours` (default 12), then the room is left out. With no
+    room reporting there is no reading, and the pump falls back as for any missing reading.
+  - After `rooms.alert_minutes` (default 30) offline, one alert per outage, counted from
+    startup for a room not yet seen, so HomeKit reconnecting after an HA restart doesn't
+    alert. Dismissed when the room reports again.
+  - `comfort_rooms` takes `{name: entity}` as well as a list, for readable alerts. Status
+    attributes `rooms`, `rooms_estimated`, `rooms_missing_minutes`, `rooms_dropped`; CSV
+    column `rooms_estimated`; a narrative line per estimated room. The offsets survive a
+    restart.
+  - 179 moves from the `sensor.179_coldest_room` / `_warmest_room` min/max helpers, which
+    skip a missing room, to `comfort_rooms`. The helpers stay for the dashboard and the
+    watchdogs.
+
 ## 0.5.3 — 2026-10-13
 
 Fixes from a review of 0.5.0-0.5.2:

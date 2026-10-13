@@ -85,13 +85,14 @@ def _pump_line(obs: dict) -> str:
 def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage: str = "1",
              test: dict | None = None, room_label: str = "the house",
              notes: list[str] | None = None, gate: dict | None = None,
-             model: dict | None = None) -> list[str]:
+             model: dict | None = None, rooms=None) -> list[str]:
     """`test`: {"reason": ..., "ends": datetime} while a step test is in charge (it replaces
     the plan line). `room_label` names what `room_temp_mean` actually is. `notes` are the
     pump's own standing lines from config (what it is in the middle of), added before the
     stage line. `gate`: {"open", "reason", "dry_run", "enabled"} when the pump switches its
     room thermostats (gate.py). `model`: {"used", "heat_off", "setpoint", "reason"} when the
-    model planner is live (0.5.0); while it is in charge it replaces the plan line."""
+    model planner is live (0.5.0); while it is in charge it replaces the plan line. `rooms`:
+    the pump's rooms.Reading, to say which rooms are estimated or left out (0.6.0)."""
     lines = []
 
     # --- house and weather
@@ -100,6 +101,13 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
         band = f"{cfg.comfort_min:g}–{cfg.comfort_max:g} °C"
         where = ("above" if room > cfg.comfort_max else "below" if room < cfg.comfort_min else "inside")
         lines.append(f"It is {out:.1f} °C outside and {room_label} is at {room:.1f} °C, {where} the comfort band of {band}.")
+
+    if rooms is not None:
+        for n, v in rooms.estimated.items():
+            mins = rooms.missing.get(n)
+            lines.append(f"{n}'s room sensor is offline ({mins} min); it is estimated at {v:.1f} °C from the other rooms.")
+        if rooms.dropped:
+            lines.append(f"Left out, offline too long to estimate: {', '.join(rooms.dropped)}.")
 
     # --- heat pump
     lines.append(_pump_line(obs))

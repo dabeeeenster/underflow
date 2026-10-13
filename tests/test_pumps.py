@@ -361,7 +361,54 @@ q._shadow_plan = lambda obs, now, rates: plans["off"]
 q.decide()
 assert q.source == "planner" and not q.heat_off
 
-print("ok: model planner live drives level, zone and thermostats, falls back to the price planner; "
+# --- a comfort-room sensor drops out (0.6.0): estimated, alerted once, dismissed on return -
+KIT, UPS, TAN = ("sensor.tado_smart_thermostat_ru2614901760_current_temperature",
+           "sensor.tado_smart_thermostat_ru1844530688_current_temperature",
+           "sensor.tado_smart_thermostat_ru3769716224_current_temperature")
+a = app(two, dict(states, **{KIT: "21.3", UPS: "20.2", TAN: "21.0"}))
+p = a.pumps["177"]
+clock = [NOW]
+a.datetime = lambda aware=True: clock[0]
+p.decide()
+assert p._observe()["room_temp_mean"] == 20.2
+a.states[UPS] = "unavailable"                         # the coldest room's Tado goes
+clock[0] = NOW + dt.timedelta(minutes=10)
+obs = p._observe()
+assert obs["room_temp_mean"] == 20.2 and obs["rooms_estimated"] == {UPS.split(".", 1)[1]: 20.2}, obs
+assert not [kw for kw in alerts(a) if "room_" in kw["notification_id"]]      # not before 30 min
+a.states[KIT], a.states[TAN] = "20.8", "20.5"           # the house cools 0.5 K: the estimate follows
+clock[0] = NOW + dt.timedelta(minutes=40)
+p.decide()
+assert abs(p._observe()["room_temp_mean"] - 19.7) < 1e-9, p._observe()["room_temp_mean"]
+room_alerts = [kw for kw in alerts(a) if "room_" in kw["notification_id"]]
+assert len(room_alerts) == 1 and "estimating it at 19.7" in room_alerts[0]["message"], room_alerts
+p.decide()
+assert len([kw for kw in alerts(a) if "room_" in kw["notification_id"]]) == 1   # once per outage
+assert "is estimated at 19.7" in a.published["sensor.underflow_177_whats_going_on"][1]["text"]
+assert a.published["sensor.underflow_177"][1]["rooms_estimated"]
+a.states[UPS] = "19.9"                                # back
+clock[0] = NOW + dt.timedelta(minutes=45)
+p._observe()
+assert any(s == "persistent_notification/dismiss" and "room_" in kw["notification_id"] for s, kw in a.calls)
+assert p.room_reading.coldest == 19.9 and not p._room_alerts
+# HA restart with the Tados not back yet: no alert inside the first 30 min
+a = app(two, dict(states, **{KIT: "unavailable", UPS: "unavailable", TAN: "unavailable"}))
+p = a.pumps["177"]
+p._observe()
+assert p._comfort_room() is None and not [kw for kw in alerts(a) if "room_" in kw["notification_id"]]
+# the offsets survive a restart
+with tempfile.TemporaryDirectory() as d:
+    a = app(two, dict(states, **{KIT: "21.3", UPS: "20.2", TAN: "21.0"}))
+    p = a.pumps["177"]
+    p.state_file = os.path.join(d, "s.json")
+    p._observe(); p._save_state(NOW)
+    cfg177 = dict(U.pump_configs(two))["177"]
+    cfg177["state_file"] = p.state_file
+    a.states[UPS] = "unavailable"
+    q = P.Pump(a, "177", cfg177, "test", True)
+    assert q._observe()["room_temp_mean"] == 20.2
+
+print("ok: comfort rooms estimated through a dropout; model planner live drives level, zone and thermostats, falls back to the price planner; "
       "single-pump config unchanged, two pumps built and isolated, forbidden registers refused, "
       "a failing pump never stops the other, sliders routed, comfort on the coldest available room, "
       "thermostat gate decides, writes, holds and restores")
