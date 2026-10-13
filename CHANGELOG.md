@@ -33,7 +33,8 @@ dashboard.
   lower of the two Vaillant sensors (179's reads high by day). Logged as `outside_temp`;
   the status sensor's `outside_temp_source` says which was used. The model was fitted on
   the Met Office reading and needs a refit on this one.
-- Deployed 13 Oct 2026 with 179's gate in dry run until the step test ends (14 Oct 18:00).
+- Deployed 13 Oct 2026 at 10:05 with 179's gate in dry run; gate live from 18:17 the same day,
+  while the step test was off and paused at its ceiling.
 
 ## 0.3.2 — 2026-10-12
 
