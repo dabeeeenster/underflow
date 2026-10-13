@@ -5,6 +5,36 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.4.0 — 2026-10-13
+
+- **Thermostat gate** (`gate:`, `gate.py`): underflow switches a pump's room thermostats
+  on and off. On 179 the Tados switch the heat pump's demand and the underfloor manifold
+  pump in the plant room. On 13 Oct 2026, with zone 1 off and the heat pump in standby,
+  that pump still ran, and it stopped within seconds of the three Tados being switched off.
+  Opened to their maximums they call all day, so it ran around the clock in mild weather.
+  - Off when the comfort room is at `comfort_max` and nothing is boosting; on again
+    `hysteresis` (default 0.3 K) under it, at a boost, at the comfort floor, or with no
+    room reading. While a step test runs it follows the test: on in a heat block, off when
+    the block is off or paused.
+  - Changes wait out `min_dwell_minutes` (default 30) unless the comfort floor or the test
+    asks.
+  - Reconciled every 5 minutes: a thermostat in the wrong mode is written over HA (`climate`
+    services), at most every 3 min each; after 3 failed tries there is an alert. Turning
+    one back on also sends its setpoint, remembered while it was on, because HomeKit
+    reports a Tado's setpoint as null while it is off. Setpoints are otherwise left alone.
+  - Its own `dry_run` (default: the pump's), so it can watch while the pump writes;
+    `enable_entity` (an `input_boolean`) turns it off from the dashboard.
+  - The position, reason and remembered setpoints survive restarts; status attributes
+    `gate_*`; CSV columns `gate_open` and `gate_calling` (thermostats calling); a narrative
+    line.
+- **One outside temperature**: `entities.outside_temp`, used by the model planner and
+  the narrative in place of the Met Office's current reading, which stays the fallback
+  and still supplies the forecast. On Ben's site it is `sensor.outside_temp_house`, the
+  lower of the two Vaillant sensors (179's reads high by day). Logged as `outside_temp`;
+  the status sensor's `outside_temp_source` says which was used. The model was fitted on
+  the Met Office reading and needs a refit on this one.
+- Deployed 13 Oct 2026 with 179's gate in dry run until the step test ends (14 Oct 18:00).
+
 ## 0.3.2 — 2026-10-12
 
 - Planner: `max_boost_price` (£/kWh, default none). A slot priced above it is never

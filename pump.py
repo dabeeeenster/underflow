@@ -1,5 +1,5 @@
 """One heat pump under underflow's control: its register, bus, plan, step test, zone,
-shadows, data log and saved state.
+room thermostats, shadows, data log and saved state.
 
 `underflow.py` is the site: it holds what the pumps share (timers, Agile prices,
 forecasts, liveness probes, alerts) and runs one `Pump` per entry under `pumps:`. With no
@@ -23,6 +23,7 @@ from reconcile import ReconcileConfig, RegisterState, decide
 from demand import Held, MirrorConfig, choose, hold
 from shared import SharedConfig, shared_step
 from testplan import TestConfig, Step, test_step, current_block
+import gate as G
 import persist
 import targets
 import shadow as SH
@@ -161,6 +162,20 @@ class Pump:
         self._cap_block = None
         self._test_was_active = False
 
+        # --- the room thermostats, switched on and off (gate.py, 0.4.0). They gate both
+        # the heat pump's demand and, on 179, the manifold pump in the plant room. Its own
+        # `dry_run` lets it watch while the pump is live.
+        try:
+            self.gate_cfg = G.GateConfig.from_args(cfg.get("gate"))
+        except Exception as exc:
+            self.gate_cfg = None
+            self.log(f"gate config rejected: {exc!r}", level="WARNING")
+        self.gate_dry_run = (self.dry_run if self.gate_cfg is None or self.gate_cfg.dry_run is None
+                             else bool(self.gate_cfg.dry_run))
+        self.gate_open, self.gate_since, self.gate_reason = None, None, ""
+        self.gate_setpoints = {}       # each thermostat's setpoint, last seen while on
+        self._gate_last_write, self._gate_misses = {}, {}
+
         # --- 5-minute CSV for fitting the models offline. See datalog.py.
         lc = cfg.get("datalog", {}) or {}   # not "log": AppDaemon reserves it
         self.log_dir = lc.get("dir")
@@ -204,6 +219,9 @@ class Pump:
         self._last_decision = None
         self.failures = 0          # consecutive ticks this pump raised; see the site
 
+        if self.gate_cfg is not None:
+            self.log(f"gate: {len(self.gate_cfg.climates)} thermostats, dry_run={self.gate_dry_run}, "
+                     f"reopen {self.gate_cfg.hysteresis:g} K under the comfort top")
         if self.test_cfg.enabled:
             self.log(f"step test configured: {len(self.test_cfg.blocks)} blocks from "
                      f"{self.test_cfg.start} to {self.test_cfg.end_at()}; floor {self.test_cfg.floor:g}")
@@ -298,6 +316,13 @@ class Pump:
         obs = {"outside_temp_met_office": self._num(e.get("weather"), "temperature")}
         for n, ent in self.outside_sensors.items():
             obs[f"outside_temp_{n}_sensor"] = self._num(ent)
+        # The one outside temperature the models and the narrative use (0.4.0): the
+        # house's own sensor (`entities.outside_temp`; on Ben's site the lower of the two
+        # Vaillant sensors), falling back to the Met Office's current reading.
+        house = self._num(e.get("outside_temp"))
+        obs["outside_temp"] = house if house is not None else obs["outside_temp_met_office"]
+        obs["outside_temp_source"] = ("house" if house is not None else
+                                      "met_office" if obs["outside_temp_met_office"] is not None else None)
         obs.update({
             "room_temp_mean": self._comfort_room(),
             "flow_temp": self._num(e.get("flow_temp")),
@@ -377,6 +402,7 @@ class Pump:
         if proposed != self.desired:
             self.log(f"target {self.desired} -> {proposed} ({source}: {reason})")
             self.desired, self.desired_since = proposed, now
+        self._decide_gate(obs, now)
 
         self._publish_plan(result, obs, now)
         self._publish_shadows(result, obs, now)
@@ -419,9 +445,11 @@ class Pump:
                  f"{result.get('cheap_slots')} cheap of {result.get('horizon_slots')} slots")
         test = ({"reason": self.step.reason, "ends": self.step.block.end if self.step.block else None}
                 if self.step.active else None)
+        gate = ({"open": self.gate_open, "reason": self.gate_reason, "dry_run": self.gate_dry_run,
+                 "enabled": self._gate_enabled()} if self.gate_cfg is not None else None)
         lines = describe(obs, result, now, cfg, self.dry_run, test=test,
                          room_label=self.args.get("room_label", "the house"),
-                         notes=self.args.get("notes"))
+                         notes=self.args.get("notes"), gate=gate)
         self._publish(
             self.narrative_entity,
             summary(lines),
@@ -514,6 +542,82 @@ class Pump:
                           variables={"mode": self.zone_desired})
         return current, "write"
 
+    # ---- room thermostats (gate.py) --------------------------------------
+    def _gate_enabled(self):
+        ent = self.gate_cfg.enable_entity if self.gate_cfg else None
+        return not ent or self.get_state(ent) != "off"
+
+    def _decide_gate(self, obs, now):
+        if self.gate_cfg is None:
+            return
+        c = self.planner_cfg
+        d = G.wanted(self.gate_cfg, self.gate_open, obs.get("room_temp_mean"), self.desired,
+                     c.baseline, c.comfort_min, c.comfort_max, self.step)
+        if d.open == self.gate_open:
+            self.gate_reason = d.reason
+        elif G.may_change(self.gate_cfg, d, self.gate_open, self.gate_since, now, self.dwell_slack):
+            self.log(f"gate: thermostats {'on' if d.open else 'off'} ({d.reason})")
+            self.gate_open, self.gate_since, self.gate_reason = d.open, now, d.reason
+        else:
+            held = "on" if self.gate_open else "off"
+            self.gate_reason = f"{d.reason}; held {held} for the dwell"
+            self.log(f"gate: holding thermostats {held} rather than switching ({d.reason}; dwell)")
+
+    def _reconcile_gate(self, now):
+        """Keep each thermostat in the mode the gate wants: a HomeKit write if one has
+        drifted (someone used the Tado app, a write was lost), at most every 3 min each.
+        Turning one back on sends its last-seen setpoint too, since HomeKit forgets it
+        while the thermostat is off (seen 13 Oct 2026)."""
+        if self.gate_cfg is None:
+            return {}
+        g = self.gate_cfg
+        enabled = self._gate_enabled()
+        states, actions = {}, []
+        for e in g.climates:
+            st = self.get_state(e)
+            states[e] = st
+            if st == g.mode_on:
+                sp = self._num(e, "temperature")
+                if sp is not None:
+                    self.gate_setpoints[e] = sp
+            if self.gate_open is None:
+                continue
+            want = g.mode_on if self.gate_open else g.mode_off
+            if st in (None, "unknown", "unavailable"):
+                actions.append(f"{e} unavailable")
+                continue
+            if st == want:
+                self._gate_misses.pop(e, None)
+                continue
+            if not enabled:
+                actions.append(f"{e} is {st}; gate disabled")
+                continue
+            last = self._gate_last_write.get(e)
+            if last and (now - last).total_seconds() < 180:
+                actions.append(f"{e} write in flight")
+                continue
+            self._gate_last_write[e] = now
+            sp = self.gate_setpoints.get(e, g.default_setpoint) if self.gate_open else None
+            if self.gate_dry_run:
+                self.log(f"DRY RUN: would set {e} {st} -> {want}" + (f" at {sp:g} °C" if sp is not None else ""))
+                actions.append(f"{e} dry run")
+                continue
+            misses = self._gate_misses[e] = self._gate_misses.get(e, 0) + 1
+            if misses == 4:
+                self._alert(f"{e} is still {st} after 3 tries to set it {want}; "
+                            f"is it reachable over HomeKit, or being changed by hand?")
+            self.log(f"WRITE: {e} {st} -> {want}" + (f" at {sp:g} °C" if sp is not None else ""))
+            if sp is not None:
+                self.call_service("climate/set_temperature", entity_id=e, hvac_mode=want, temperature=sp)
+            else:
+                self.call_service("climate/set_hvac_mode", entity_id=e, hvac_mode=want)
+            actions.append(f"{e} write")
+        return {"gate_open": self.gate_open, "gate_reason": self.gate_reason,
+                "gate_since": self.gate_since.isoformat(timespec="minutes") if self.gate_since else None,
+                "gate_enabled": enabled, "gate_dry_run": self.gate_dry_run,
+                "gate_states": states, "gate_setpoints": dict(self.gate_setpoints),
+                "gate_action": "; ".join(actions) or ("applied" if self.gate_open is not None else "undecided")}
+
     def on_averaged(self, name, value, at):
         avg = self._averages.get(name)
         if avg is not None:
@@ -528,7 +632,7 @@ class Pump:
         self._last_log = now
         try:
             row = {"ts": now.isoformat(timespec="seconds")}
-            for k in ("outside_temp_met_office", *(f"outside_temp_{n}_sensor" for n in self.outside_sensors),
+            for k in ("outside_temp", "outside_temp_met_office", *(f"outside_temp_{n}_sensor" for n in self.outside_sensors),
                       "room_temp_mean", "flow_temp", "flow_temp_circuit", "return_temp",
                       "power_in_kw", "power_out_kw", "heat_curve", "min_flow_temp", "max_flow_temp",
                       "agile_rate_now", "pump_status", "mode"):
@@ -552,6 +656,10 @@ class Pump:
                 "test_capped": self.step.capped if self.step.active else None,
                 "dry_run": self.dry_run,
             })
+            if self.gate_cfg is not None:
+                row["gate_open"] = self.gate_open
+                row["gate_calling"] = sum(1 for e in self.gate_cfg.climates
+                                          if self.get_state(e, attribute="hvac_action") == "heating")
             if self._last_shadow:
                 row["model_level"] = self._last_shadow.get("state")
                 row["model_pred_3h"] = self._last_shadow.get("predicted_coldest_3h")
@@ -570,6 +678,9 @@ class Pump:
                   "guard_block": self._guard_block, "cap_block": self._cap_block,
                   "test_was_active": self._test_was_active, "zone_desired": self.zone_desired,
                   "last_log": self._last_log}
+            if self.gate_cfg is not None:
+                st["gate"] = {"open": self.gate_open, "since": self.gate_since,
+                              "setpoints": self.gate_setpoints}
             if self.shadow is not None:
                 kf, c = self.shadow.kf, self.shadow.cache
                 st["kf"] = None if kf.x is None else {"x": kf.x.tolist(), "P": kf.P.tolist(),
@@ -602,6 +713,13 @@ class Pump:
                 self.zone_desired = doc["zone_desired"]
                 restored.append(f"zone wanted {self.zone_desired}")
             self._last_log = persist._dt(doc.get("last_log"))
+            gs = doc.get("gate")
+            if self.gate_cfg is not None and gs:
+                self.gate_open, self.gate_since = gs.get("open"), persist._dt(gs.get("since"))
+                self.gate_setpoints = {k: float(v) for k, v in (gs.get("setpoints") or {}).items()
+                                       if k in self.gate_cfg.climates}
+                if self.gate_open is not None:
+                    restored.append(f"thermostats {'on' if self.gate_open else 'off'}")
             kf = doc.get("kf")
             at = persist._dt(kf.get("at")) if kf else None
             if self.shadow is not None and kf and at and (now - at).total_seconds() < 3600:
@@ -636,7 +754,7 @@ class Pump:
                     heat = None
             pv = row.get("pv_w")
             self.shadow.observe(now, obs.get("room_temp_mean"), heat or 0.0,
-                                obs.get("outside_temp_met_office"),
+                                obs.get("outside_temp"),
                                 (float(pv) / 1000.0) if isinstance(pv, (int, float)) else 0.0)
         except Exception as exc:
             self.log(f"model observe failed: {exc!r}", level="WARNING")
@@ -653,7 +771,7 @@ class Pump:
                                           self.model_forecast.get("solcast", []))
             self.shadow.cache.offer(now, met=met or None, sol=sol or None)
             out = self.shadow.plan(now, rates, self.planner_cfg.comfort_min,
-                                   obs.get("outside_temp_met_office"))
+                                   obs.get("outside_temp"))
             self._last_shadow = out
             state = out.pop("state")
             self._publish(self.model_entity, state, {
@@ -692,6 +810,7 @@ class Pump:
         decision, self.reg_state = decide(self.desired, reading, signal_on, stable_for,
                                           self.reg_state, now, self.reconcile_cfg)
         zone_state, zone_action = self._reconcile_zone(signal_on, stable_for, now)
+        gate_attrs = self._reconcile_gate(now)
 
         extra = {
             "desired_min_flow": self.desired,
@@ -719,6 +838,7 @@ class Pump:
             "test_reason": self.step.reason if self.step.active else None,
             "test_ends": (self.test_cfg.end_at().isoformat(timespec="minutes")
                           if self.test_cfg.enabled and self.test_cfg.end_at() else None),
+            **gate_attrs,
             **self.reg_state.as_attributes(),
         }
         self._publish_status(obs, extra)

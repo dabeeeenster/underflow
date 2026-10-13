@@ -33,6 +33,10 @@ underflow:
       - {name: 177_hmu,   host: 192.168.1.9, port: 8888, circuit: hmu,   register: Status01}
   entities:                # shared by both pumps
     weather: weather.met_office_wood_green
+    # The one outside temperature the models and narrative use (0.4.0); the Met Office's
+    # current reading if it is unavailable. Here an HA template: the lower of the two pump
+    # sensors, since 179's reads high by day.
+    outside_temp: sensor.outside_temp_house
     outside_sensors:       # logged as outside_temp_<name>_sensor, in this order
       "179": sensor.heating_ebusd179_broadcast_outsidetemp
       "177": sensor.heating_ebusd177_broadcast_outsidetemp
@@ -78,6 +82,18 @@ underflow:
         script: script.set_179_zone_mode
         mode_on: day           # what zone 1's select calls on and off (the defaults)
         mode_off: "off"        # quoted: bare off is YAML for false (accepted either way)
+      # Room thermostats switched on and off (gate.py, 0.4.0): off when the coldest room is
+      # at the comfort top and nothing is boosting, on again 0.3 K under it. They switch
+      # the heat pump's demand and the manifold pump. Setpoints are left alone.
+      gate:
+        climates:
+          - climate.tado_smart_thermostat_ru1870089728   # Living Room
+          - climate.tado_smart_thermostat_ru3351793152   # Bedrooms
+          - climate.tado_smart_thermostat_ru3930213888   # Upstairs
+        hysteresis: 0.3
+        min_dwell_minutes: 30
+        enable_entity: input_boolean.underflow_179_thermostat_gate
+        dry_run: true          # watch first; the pump itself is live
       model:
         provisional: true
         top: 23.5

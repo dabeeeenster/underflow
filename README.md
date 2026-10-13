@@ -34,7 +34,7 @@ C_room · dT_room/dt = (T_slab − T_room) / R_sr − (T_room − T_out) / R_ro 
 ```
 
 `Q_in` is the heat the pump delivers (its yield power on the bus), `T_out` the outside
-temperature from the weather entity, and `T_room` the mean of the room sensors. The five parameters are fitted
+temperature (`entities.outside_temp`, falling back to the weather entity's current reading), and `T_room` the mean of the room sensors. The five parameters are fitted
 by least squares on five-minute data, with the slab temperature as a hidden state. A
 Kalman filter tracks that state at run time.
 
@@ -53,6 +53,14 @@ simple rules.
 Room thermostats are set a couple of degrees above target with no schedule, so every
 loop stays open and the flow temperature controls the heat, as Havenwise does. They are
 still the comfort sensors.
+
+Open thermostats call all day, though, and a call does more than ask for heat: it can
+run the underfloor manifold's own pump. With a `gate:` block (0.4.0, `gate.py`) underflow
+switches the thermostats off when it has no reason to heat (the coldest room at the
+comfort top and nothing to boost) and back on 0.3 K under it, at a boost, at the comfort
+floor, or when a step test heats. Their setpoints are left alone, so each still caps its
+room. A dwell stops it chattering, a 5-minute reconcile puts back any thermostat that
+drifts, and an `input_boolean` turns the gate off from the dashboard.
 
 ## Roadmap
 
@@ -78,6 +86,7 @@ still the comfort sensors.
 | `shared.py` | Shadow demand source: steer by the neighbour's room sensor in small capped steps, limited both ways by this half's room mean. Pure |
 | `probe.py` | Is each device still on the bus? Uses ebusd's `lastup`, adds no bus traffic. Pure |
 | `hasafe.py` | Stops AppDaemon dropping zero and `False` attributes on the way to HA |
+| `gate.py` | When the room thermostats should be allowed to call: off at the comfort top, on to boost or heat, following a step test. Pure |
 | `narrative.py` | Plain-English status bullets, published as `sensor.underflow_whats_going_on` for a markdown card |
 | `model.py` | Stage 2: `HouseModel`, `fit_house`, `KalmanFilter`, `CopModel`, `fit_cop`, `flow_target` |
 | `tools/ha_dashboard.py` | Get or save a storage-mode dashboard over the websocket |
@@ -101,10 +110,11 @@ Tests are standalone scripts: `uv run tests/<name>.py` (`test_model.py` also nee
 | `test_persist.py` | Saved state round-trips; a tripped step-test guard stays tripped across a restart; stale, corrupt or foreign state files are ignored |
 | `test_targets.py` | HA slider values override the comfort band and test guards; out-of-range, unparsable or upside-down values fall back to apps.yaml |
 | `test_testplan.py` | Step-test blocks start and end on schedule, "off" asks for the zone off, the floor guard trips and latches, the ceiling pauses a heat block and lets it resume 0.5 K under; the CSV log keeps one header per file |
+| `test_gate.py` | The thermostat gate closes at the comfort top and reopens 0.3 K under it, opens to boost or at the floor, follows a step test, fails open, and holds non-urgent changes for the dwell |
 | `test_demand.py` | Mirror held through a dropout, dropped when stale; caps and comfort band apply |
 | `test_shared.py` | Deadband, one step per tick, floor and cap, this half's rooms override the shared sensor |
 | `test_probe.py` | A steady value stays alive; blips are debounced; a missing device is found |
-| `test_pumps.py` | A one-pump apps.yaml works as before; two pumps get their own config plus the inherited site keys, nothing leaking; a pump pointed at a forbidden register is refused while the other starts; a pump that raises never stops the other; a slider re-decides its own pump only; comfort on the coldest available room |
+| `test_pumps.py` | A one-pump apps.yaml works as before; two pumps get their own config plus the inherited site keys, nothing leaking; a pump pointed at a forbidden register is refused while the other starts; a pump that raises never stops the other; a slider re-decides its own pump only; comfort on the coldest available room; the thermostat gate decides, writes over HomeKit with the remembered setpoint, holds in flight, respects its switch and survives a restart; the house outside temperature with the Met Office fallback |
 
 ### Synthetic test results
 
@@ -264,6 +274,13 @@ Per pump:
   `day` / `off`).
 - `entities.outside_sensors: {name: entity}` lists outside sensors to log as
   `outside_temp_<name>_sensor`. The older `outside_179` / `outside_177` keys still work.
+- `entities.outside_temp` is the one outside temperature the model planner and the
+  narrative use (logged as `outside_temp`). Without it, or while it is unavailable, they
+  use the weather entity's current reading.
+- `gate:` switches room thermostats on and off (`climates`, `mode_on`/`mode_off`,
+  `hysteresis`, `min_dwell_minutes`, `enable_entity`, its own `dry_run`). See
+  `examples/two-pumps.yaml`. Pair it with an HA watchdog that turns the thermostats back
+  on if underflow stops publishing.
 
 If you later add a new block to the app's config in `apps.yaml`, restart the AppDaemon
 add-on. AppDaemon can fail to reload the config (`KeyError` in `deep_compare`) and keep

@@ -51,15 +51,16 @@ def _dur(a: dt.datetime, b: dt.datetime):
 
 def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage: str = "1",
              test: dict | None = None, room_label: str = "the house",
-             notes: list[str] | None = None) -> list[str]:
+             notes: list[str] | None = None, gate: dict | None = None) -> list[str]:
     """`test`: {"reason": ..., "ends": datetime} while a step test is in charge (it replaces
     the plan line). `room_label` names what `room_temp_mean` actually is. `notes` are the
     pump's own standing lines from config (what it is in the middle of), added before the
-    stage line."""
+    stage line. `gate`: {"open", "reason", "dry_run", "enabled"} when the pump switches its
+    room thermostats (gate.py)."""
     lines = []
 
     # --- house and weather
-    out = obs.get("outside_temp_met_office"); room = obs.get("room_temp_mean")
+    out = obs.get("outside_temp", obs.get("outside_temp_met_office")); room = obs.get("room_temp_mean")
     if out is not None and room is not None:
         band = f"{cfg.comfort_min:g}–{cfg.comfort_max:g} °C"
         where = ("above" if room > cfg.comfort_max else "below" if room < cfg.comfort_min else "inside")
@@ -113,6 +114,15 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
             action = f"raise the minimum flow temperature to {sp:g} °C to push heat into the slab"
         verb = "would" if dry_run else "will"
         lines.append(f"The plan {verb} {action} ({reason}).")
+    if gate and gate.get("open") is not None:
+        state = "on" if gate["open"] else "off"
+        if not gate.get("enabled", True):
+            lines.append(f"Room thermostats: switching is disabled from the dashboard; underflow would have them {state} ({gate.get('reason')}).")
+        elif gate.get("dry_run"):
+            lines.append(f"Room thermostats: underflow would have them {state} ({gate.get('reason')}), but in dry run it leaves them alone.")
+        else:
+            why = "" if gate["open"] else ", so nothing calls for heat and the circulation pumps rest"
+            lines.append(f"Room thermostats are {state}{why} ({gate.get('reason')}).")
     if dry_run:
         curve = obs.get("heat_curve")
         curve_txt = f"the {curve:g} heating curve" if curve is not None else "the heating curve"

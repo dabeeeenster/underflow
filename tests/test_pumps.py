@@ -230,5 +230,72 @@ for since, moved in ((dt.timedelta(minutes=29, seconds=59), True), (dt.timedelta
     assert (p.desired != 42.0) is moved, (since, p.desired)
 assert any("(dwell)" in m for _, m in a.logs)
 
+# --- thermostat gate (0.4.0): 179's Tados off at the comfort top, on again below ---------
+import tempfile, os
+TADOS = two["pumps"]["179"]["gate"]["climates"]
+gstates = dict(states, **{"sensor.179_coldest_room": "22.6", "sensor.outside_temp_house": "15.0",
+                          "weather.met_office_wood_green": {"state": "cloudy", "temperature": 14.0}})
+for e in TADOS:
+    gstates[e] = {"state": "heat", "temperature": 25, "hvac_action": "heating"}
+a = app(two, gstates)
+p = a.pumps["179"]
+assert p.gate_cfg is not None and p.gate_dry_run is True and p.dry_run is False   # watch while live
+assert a.pumps["177"].gate_cfg is None
+a.on_decide()
+attrs = a.published["sensor.underflow_179"][1]
+assert p.gate_open is False and attrs["gate_open"] == "false" and "comfort top" in attrs["gate_reason"], attrs
+assert not [c for c in a.calls if c[0].startswith("climate/")]                 # dry run: no writes
+assert sum("DRY RUN: would set climate." in m for _, m in a.logs) == 3
+assert p.gate_setpoints == {e: 25.0 for e in TADOS}                            # remembered while on
+assert "Room thermostats: underflow would have them off" in a.published["sensor.underflow_179_whats_going_on"][1]["text"]
+# one outside temperature: the house sensor, else the Met Office
+assert attrs["outside_temp"] == "15.0" and attrs["outside_temp_source"] == "house"
+a.states["sensor.outside_temp_house"] = "unavailable"
+assert p._observe()["outside_temp"] == 14.0 and p._observe()["outside_temp_source"] == "met_office"
+
+# live: three HomeKit writes, not repeated while in flight
+p.gate_dry_run, p._gate_last_write = False, {}
+a.calls.clear()
+p.reconcile()
+offs = [kw for s, kw in a.calls if s == "climate/set_hvac_mode"]
+assert sorted(kw["entity_id"] for kw in offs) == sorted(TADOS) and {kw["hvac_mode"] for kw in offs} == {"off"}
+p.reconcile()
+assert len([c for c in a.calls if c[0].startswith("climate/")]) == 3
+# Tados off (HomeKit then reports no setpoint); room falls under the top but within hysteresis: stays off
+for e in TADOS:
+    a.states[e] = {"state": "off", "temperature": None, "hvac_action": "idle"}
+a.states["sensor.179_coldest_room"] = "22.3"
+p.decide()
+assert p.gate_open is False and "reopens below 22.2" in p.gate_reason, p.gate_reason
+# under the hysteresis, but inside the dwell: held off
+a.states["sensor.179_coldest_room"] = "22.0"
+p.gate_since = NOW - dt.timedelta(minutes=10)
+p.decide()
+assert p.gate_open is False and "dwell" in p.gate_reason, p.gate_reason
+# after the dwell: on, with the remembered setpoint (HomeKit forgot it)
+p.gate_since, p._gate_last_write = NOW - dt.timedelta(minutes=31), {}
+a.calls.clear()
+p.decide()
+assert p.gate_open is True
+ons = [kw for s, kw in a.calls if s == "climate/set_temperature"]
+assert len(ons) == 3 and all(kw["hvac_mode"] == "heat" and kw["temperature"] == 25.0 for kw in ons), ons
+# the dashboard switch off: nothing written
+a.states["input_boolean.underflow_179_thermostat_gate"] = "off"
+p._gate_last_write = {}
+a.calls.clear()
+p.reconcile()
+assert not [c for c in a.calls if c[0].startswith("climate/")]
+assert "gate disabled" in a.published["sensor.underflow_179"][1]["gate_action"]
+# survives a restart
+with tempfile.TemporaryDirectory() as d:
+    path = os.path.join(d, "state.json")
+    p.state_file = path
+    p._save_state(NOW)
+    cfg179 = dict(U.pump_configs(two))["179"]
+    cfg179["state_file"] = path
+    q = P.Pump(a, "179", cfg179, "test", True)
+    assert q.gate_open is True and q.gate_setpoints == {e: 25.0 for e in TADOS}, (q.gate_open, q.gate_setpoints)
+
 print("ok: single-pump config unchanged, two pumps built and isolated, forbidden registers refused, "
-      "a failing pump never stops the other, sliders routed, comfort on the coldest available room")
+      "a failing pump never stops the other, sliders routed, comfort on the coldest available room, "
+      "thermostat gate decides, writes, holds and restores")
