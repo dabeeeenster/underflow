@@ -328,6 +328,27 @@ p.desired_since = NOW - dt.timedelta(hours=1)
 p.decide()
 assert p.source == "planner" and "model planner unavailable" in p.source_reason and not p.heat_off, p.source_reason
 assert "price planner is standing in" in a.published["sensor.underflow_179_whats_going_on"][1]["text"]
+# the comfort-room sensor goes away: the model steps aside, the price planner stands in and
+# the thermostats open (0.5.3); before, a stale plan could hold the heat off unwatched
+use["plan"] = plans["off"]
+a.states["sensor.179_coldest_room"] = "unavailable"
+p.desired_since, p.gate_since = NOW - dt.timedelta(hours=1), NOW - dt.timedelta(hours=1)
+p.decide()
+assert p.source == "planner" and "no room reading" in p.source_reason and not p.heat_off, p.source_reason
+assert p.gate_open is True, p.gate_reason
+a.states["sensor.179_coldest_room"] = "21.0"
+# a comfort-floor boost from the model skips the dwell even when the price planner, already
+# boosting a cheap slot, has nothing urgent of its own (0.5.3)
+a.states["sensor.179_coldest_room"] = "19.9"
+p.desired, p.desired_since = 20.0, NOW - dt.timedelta(minutes=5)
+real_plan = P.plan
+P.plan = lambda *args, **kw: dict(real_plan(*args, **kw), setpoint_now=32.0, urgent=False)
+try:
+    p.decide()
+finally:
+    P.plan = real_plan
+assert p.source == "model" and p.desired == 32.0, (p.source, p.desired, p.source_reason)
+a.states["sensor.179_coldest_room"] = "21.0"
 # a running step test still wins
 use["plan"] = plans["off"]
 p.test_cfg = p._base_test_cfg = TP.TestConfig.from_args({"enabled": True, "start": (NOW - dt.timedelta(hours=1)).isoformat(),

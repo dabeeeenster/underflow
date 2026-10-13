@@ -5,6 +5,22 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.5.3 — 2026-10-13
+
+Fixes from a review of 0.5.0-0.5.2:
+
+- **No room reading, no model planner.** With the comfort-room sensor unavailable, the live
+  model planner kept planning from its last estimate and could hold the heat off
+  indefinitely: the comfort-floor override and the watchdog's 19.5 °C rule both need the
+  reading, and "model has heat off" came before the gate's "no reading, so the thermostats
+  decide". Now the price planner stands in (reason "no room reading") and the gate opens.
+- **A comfort override from the model skips the dwell.** The dwell's "urgent" flag came from
+  the price planner's own comfort check. When it was already boosting a cheap slot it had
+  nothing urgent, so the model's floor boost could wait up to 30 minutes. The flag now comes
+  from the source in charge.
+- Narrative: cooling status codes read "cooling the house", not "heating the house" (177's
+  circuit 1 is cooling).
+
 ## 0.5.2 — 2026-10-13
 
 - Narrative: the heat-pump line follows the HMU's run-data status code, which is polled

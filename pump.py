@@ -392,10 +392,14 @@ class Pump:
         if self.model_live:
             m = from_model(model_out, obs.get("room_temp_mean"), self.planner_cfg)
             if m is not None:
-                proposed, self.heat_off, reason = m
+                proposed, self.heat_off, reason, urgent = m
                 source = "model"
+                # A comfort override skips the dwell. The price planner's own flag says
+                # whether *its* setpoint was overridden, which is not the question here.
+                result = dict(result, urgent=urgent)
             else:
-                why = "no fitted parameters" if self.shadow is None else "no plan this tick"
+                why = ("no fitted parameters" if self.shadow is None else
+                       "no room reading" if obs.get("room_temp_mean") is None else "no plan this tick")
                 reason = f"model planner unavailable ({why}), so the price planner: {reason}"
 
         # A running step test overrides everything above, price included.

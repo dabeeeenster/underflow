@@ -46,5 +46,7 @@ assert _pump_line({"pump_status": "hwc_prerun"}) == "The heat pump is starting a
 assert _pump_line({"pump_status": "heat_overrun"}) == "The heat pump is finishing a heating run (pump overrun)."
 assert _pump_line({"pump_status": "heat_compressor_shutdown"}) == "The heat pump is between heating runs (compressor off)."
 assert _pump_line({"pump_status": "standby", "power_in_kw": 1.0, "power_out_kw": 3.0}) == "The heat pump is in standby."
+assert _pump_line({"pump_status": "cool_compressor_active", "power_in_kw": 1.0, "power_out_kw": 3.0}).startswith("The heat pump is cooling the house")
+assert _pump_line({"pump_status": "cool_overrun"}) == "The heat pump is finishing a cooling run (pump overrun)."
 assert _pump_line({"pump_status": "frost_protection"}) == "The heat pump is not running (frost_protection)."
 print("narrative OK")

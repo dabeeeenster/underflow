@@ -87,23 +87,31 @@ def _comfort(value: float, room_temp: float | None, cfg) -> tuple[float, str]:
     return value, ""
 
 
-def from_model(plan: dict | None, room_temp: float | None, cfg) -> tuple[float, bool, str] | None:
-    """The live model planner's demand for now: (min flow, heat_off, reason), or None if
-    there is no usable plan, when the caller falls back to the price planner.
+def from_model(plan: dict | None, room_temp: float | None, cfg) -> tuple[float, bool, str, bool] | None:
+    """The live model planner's demand for now: (min flow, heat_off, reason, urgent), or
+    None if there is no usable plan, when the caller falls back to the price planner.
 
     "off" means no space heating: the pump turns the zone and the room thermostats off,
     and holds the register at the baseline so nothing is left boosted. The comfort band
     still binds: at or below the floor an "off" or a low level becomes a boost, and at or
-    above the top a boost is cut to the baseline."""
+    above the top a boost is cut to the baseline; either override is `urgent`, so it
+    doesn't wait out the dwell.
+
+    No room reading is no plan: with the comfort room unavailable the model would keep
+    planning from a stale estimate, and nothing could catch it getting cold (the floor
+    override and the watchdog both need the reading). The price planner and the gate both
+    fail towards heat without one."""
+    if room_temp is None:
+        return None
     if not plan or plan.get("level_now") is None or plan.get("state") in (None, "waiting"):
         return None
     lvl = plan["level_now"]
     pred = plan.get("predicted_min")
     ahead = f"; coldest room forecast {pred:.1f} °C over the next day" if isinstance(pred, (int, float)) else ""
     if str(lvl).lower() == "off":
-        if room_temp is not None and room_temp <= cfg.comfort_min:
+        if room_temp <= cfg.comfort_min:
             return cfg.boost, False, (f"model planner has heat off, but the room is {room_temp:.1f} °C "
-                                      f"at the {cfg.comfort_min:g} °C floor, so boosting to {cfg.boost:g}")
-        return cfg.baseline, True, f"model planner: heat off{ahead}"
+                                      f"at the {cfg.comfort_min:g} °C floor, so boosting to {cfg.boost:g}"), True
+        return cfg.baseline, True, f"model planner: heat off{ahead}", False
     value, why = _comfort(float(lvl), room_temp, cfg)
-    return value, False, f"model planner: {float(lvl):g} °C{ahead}{why}"
+    return value, False, f"model planner: {float(lvl):g} °C{ahead}{why}", bool(why)

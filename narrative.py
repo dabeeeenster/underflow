@@ -64,8 +64,9 @@ def _pump_line(obs: dict) -> str:
     pin, pout, cop, flow = obs.get("power_in_kw"), obs.get("power_out_kw"), obs.get("cop_now"), obs.get("flow_temp")
     if status == "standby":
         return "The heat pump is in standby."
-    hot = "hwc" in status or "dhw" in status
-    job, active = ("hot water", "heating hot water") if hot else ("heating", "heating the house")
+    job, active = (("hot water", "heating hot water") if "hwc" in status or "dhw" in status else
+                   ("cooling", "cooling the house") if "cool" in status else
+                   ("heating", "heating the house"))
     phase = next((t for key, t in _PHASES if key in status), None)
     if phase is None:
         if pin and pout and pin > 0.2:
@@ -139,7 +140,8 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
             lines.append(f"The model planner has the heating off: zone and room thermostats off, nothing circulating ({model.get('reason')}).")
         else:
             msp = model.get("setpoint")
-            action = (f"leave the minimum flow at {msp:g} °C so the heating curve decides" if msp is not None and msp <= cfg.baseline
+            action = ("hold the minimum flow" if msp is None else
+                      f"leave the minimum flow at {msp:g} °C so the heating curve decides" if msp <= cfg.baseline
                       else f"set the minimum flow to {msp:g} °C")
             lines.append(f"The model planner {verb} {action} ({model.get('reason')}).")
     elif sp is not None:

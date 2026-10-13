@@ -58,14 +58,18 @@ assert v is None and src == "none"
 from demand import from_model
 assert from_model(None, 21.0, pc) is None
 assert from_model({"state": "waiting", "reason": "no room reading yet"}, 21.0, pc) is None
-v, off, why = from_model({"state": "off", "level_now": "off", "predicted_min": 20.65}, 23.2, pc)
-assert (v, off) == (pc.baseline, True) and "heat off" in why and "20.6" in why, (v, off, why)
-v, off, why = from_model({"state": "32", "level_now": 32.0}, 21.0, pc)
-assert (v, off) == (32.0, False) and "32" in why
-# comfort binds: off at the floor becomes a boost; a boost at the top is cut
-v, off, why = from_model({"state": "off", "level_now": "off"}, pc.comfort_min, pc)
-assert (v, off) == (pc.boost, False) and "floor" in why, (v, off, why)
-v, off, why = from_model({"state": "38", "level_now": 38.0}, pc.comfort_max + 0.1, pc)
-assert (v, off) == (pc.baseline, False) and "cut" in why, (v, off, why)
+v, off, why, urgent = from_model({"state": "off", "level_now": "off", "predicted_min": 20.65}, 23.2, pc)
+assert (v, off, urgent) == (pc.baseline, True, False) and "heat off" in why and "20.6" in why, (v, off, why)
+v, off, why, urgent = from_model({"state": "32", "level_now": 32.0}, 21.0, pc)
+assert (v, off, urgent) == (32.0, False, False) and "32" in why
+# comfort binds, and skips the dwell: off at the floor becomes a boost; a boost at the top is cut
+v, off, why, urgent = from_model({"state": "off", "level_now": "off"}, pc.comfort_min, pc)
+assert (v, off, urgent) == (pc.boost, False, True) and "floor" in why, (v, off, why)
+v, off, why, urgent = from_model({"state": "20", "level_now": 20.0}, pc.comfort_min, pc)
+assert (v, off, urgent) == (pc.boost, False, True), (v, off, why)
+v, off, why, urgent = from_model({"state": "38", "level_now": 38.0}, pc.comfort_max + 0.1, pc)
+assert (v, off, urgent) == (pc.baseline, False, True) and "cut" in why, (v, off, why)
+# no room reading is no plan (0.5.3): a stale model must not hold the heat off unwatched
+assert from_model({"state": "off", "level_now": "off"}, None, pc) is None
 
 print("demand OK: model planner off/level/comfort, mirror held across a dropout, abandoned at 45 min, cap and comfort band bind")
