@@ -6,8 +6,10 @@ heat pump behave, then sets the pump's **minimum flow temperature** for each hal
 against the Octopus Agile tariff and the weather forecast, using the concrete slab to
 store heat.
 
-**Status: stage 0, observe only.** It publishes sensors and writes nothing. See
-[Roadmap](#roadmap).
+**Status: stage 2, live on the author's house** (October 2026). One app drives two
+aroTHERMs. On one, a model planner plans the next 24 h against the weather, sun and price
+forecasts; the other runs on simpler price rules until it has a fitted model. Everything
+defaults to `dry_run: true`. See [Roadmap](#roadmap).
 
 ## Why
 
@@ -29,33 +31,43 @@ thermal model with five parameters will.
 **House.** Two thermal masses, the slab and the room air:
 
 ```
-C_slab · dT_slab/dt = Q_in − (T_slab − T_room) / R_sr
-C_room · dT_room/dt = (T_slab − T_room) / R_sr − (T_room − T_out) / R_ro + g · solar
+C_slab · dT_slab/dt = Q_in + g_slab · solar − (T_slab − T_room) / R_sr
+C_room · dT_room/dt = (T_slab − T_room) / R_sr − (T_room − T_out) / R_ro + g_room · solar
 ```
 
-`Q_in` is the heat the pump delivers (its yield power on the bus), `T_out` the outside
-temperature (`entities.outside_temp`, falling back to the weather entity's current reading), and `T_room` the mean of the room sensors. The five parameters are fitted
-by least squares on five-minute data, with the slab temperature as a hidden state. A
-Kalman filter tracks that state at run time.
+`Q_in` is the heat the pump delivers (its yield power on the bus), `solar` the PV output
+as a proxy for sun, `T_out` the outside temperature (`entities.outside_temp`, falling
+back to the weather entity's current reading), and `T_room` the comfort room: the coldest
+of the room sensors (`entities.comfort_rooms`) or an HA sensor (`entities.room_mean`).
+The six parameters are fitted by least squares on the five-minute data log
+(`tools/fit_log.py`), with the slab temperature as a hidden state. A Kalman filter tracks
+that state at run time. On the author's house a fit on an 81 h step test forecasts the
+coldest room 3-12 h ahead to within about 0.3 K.
 
 **Heat pump.** The Vaillant controller's flow target is
 `max(curve(T_out), MinFlow)`. Its cost comes from a Carnot-fraction COP,
 `COP = η · T_flow / (T_flow − T_out)` in kelvin, with `η` fitted from measured electrical
 and heat power. Heat into the slab is `k · (T_flow − T_slab)`.
 
-**Model planner** (`mpc.py`). For each half-hour of the next 24, pick zone off or a
+**Price planner** (`planner.py`, stage 1). Boost the minimum flow in the cheapest third of
+the next 24 h of Agile slots (never above `max_boost_price`), leave the heating curve in
+charge otherwise. It knows nothing about weather or the slab's lag, but it needs nothing
+but prices, so it is the fallback whenever the model planner has no plan.
+
+**Model planner** (`mpc.py`, `shadow.py`). For each half-hour of the next 24, pick zone off or a
 minimum flow from a few levels (20, 25, 32, 38, 42 °C) so the coldest room stays above the
 comfort floor for the least `Σ price × Q / COP`. It is greedy: start with everything off,
 simulate the house against the weather and sun forecasts, and at the first slot where the
 coldest room would fall below the floor, raise the earlier slot that buys the most degrees
-at that moment per penny; repeat. A raise may not push the warmest room over the top
-before that moment. Because the slab carries heat for hours, this banks cheap night heat
+at that moment per penny; repeat. A raise may not push the warmest room over the top (the
+comfort top plus the usual room spread) before that moment. Because the slab carries heat for hours, this banks cheap night heat
 for the morning and skips heat a sunny afternoon will supply.
 
 With `model.live: true` (0.5.0) its plan for the slot now drives the pump: a level is
 written as the minimum flow, "off" turns the zone and the room thermostats off. Without a
-plan (no fit, a failed tick) the rule-based price planner stands in. The comfort band binds
-on both. Without `live` the plan is only published (`sensor.underflow_model_plan`), a
+plan (no fit, a failed tick, no room reading) the price planner stands in. The comfort band
+binds on both: at the floor anything becomes a boost, at the top a boost is cut, and
+neither waits out the dwell. Without `live` the plan is only published (`sensor.underflow_model_plan`), a
 shadow to compare against what happened. Refit with `tools/fit_log.py` as data comes in.
 
 Room thermostats are set a couple of degrees above target with no schedule, so every
@@ -64,21 +76,27 @@ still the comfort sensors.
 
 Open thermostats call all day, though, and a call does more than ask for heat: it can
 run the underfloor manifold's own pump. With a `gate:` block (0.4.0, `gate.py`) underflow
-switches the thermostats off when it has no reason to heat (the coldest room at the
-comfort top and nothing to boost) and back on 0.3 K under it, at a boost, at the comfort
-floor, or when a step test heats. Their setpoints are left alone, so each still caps its
+switches the thermostats off when it has no reason to heat (the model planner has heat
+off, or the coldest room is at the comfort top with nothing to boost) and back on when
+there is: 0.3 K under the top, at a boost, at the comfort floor, or when a step test heats. Their setpoints are left alone, so each still caps its
 room. A dwell stops it chattering, a 5-minute reconcile puts back any thermostat that
 drifts, and an `input_boolean` turns the gate off from the dashboard.
+
+**Room sensors that fail** (`rooms.py`). A room sensor that goes unavailable, or freezes on
+one value while every other room moves, is estimated from the other rooms at its usual
+offset from each, with an alert, rather than silently ignored: dropping the room that is
+usually coldest would make the house look warmer and the planner heat less.
 
 ## Roadmap
 
 | Stage | What | Status (author's house) |
 |---|---|---|
 | 0 | Observe: publish all model inputs as `sensor.underflow`, write nothing | live since Sep 2026 |
-| 1 | Agile rules (`planner.py`): raise min flow in the cheapest third of upcoming slots, baseline otherwise; the comfort band overrides | running in dry run, publishing `sensor.underflow_planned_min_flow`; goes live Oct 2026 |
-| 1b | Reliable writes (`reconcile.py`, `ebusd.py`): hold a target, check it against the bus every 5 min, write only if it differs | running in dry run since Sep 2026 |
-| 1s | Shadows: publish what two other demand sources would ask for, never written. `sensor.underflow_shadow_mirror` copies the neighbouring controller's min flow; `sensor.underflow_shadow_shared` (`shared.py`) steers by the room sensor that controller uses, with this half's own rooms as limits both ways | added Oct 2026, for a week's comparison before choosing a demand source |
-| 2 | House and COP models (`model.py`): 2R2C fit, Kalman filter, Carnot-fraction COP; model planner (`mpc.py`) | fitted on a 4-day step test (10-14 Oct 2026); planner shadowed from 11 Oct, live on 179 from 13 Oct 2026 (0.5.0) |
+| 1 | Agile rules (`planner.py`): raise min flow in the cheapest third of upcoming slots, baseline otherwise; the comfort band overrides | live on one pump from 10 Oct 2026, the second from 12 Oct; since 0.5.0 the fallback where the model planner runs |
+| 1b | Reliable writes (`reconcile.py`, `ebusd.py`): hold a target, check it against the bus every 5 min, write only if it differs | live since 10 Oct 2026 |
+| 1s | Shadows: publish what two other demand sources would ask for, never written. `sensor.underflow_shadow_mirror` copies the neighbouring controller's min flow; `sensor.underflow_shadow_shared` (`shared.py`) steers by the room sensor that controller uses | tried Oct 2026; retired in 0.3.1 when the neighbouring controller was replaced by underflow itself |
+| 1g | Thermostat gate (`gate.py`): switch the room thermostats off when there's no reason to heat | live from 13 Oct 2026 (0.4.0) |
+| 2 | House and COP models (`model.py`): 2R2C fit, Kalman filter, Carnot-fraction COP; model planner (`mpc.py`) | step test 10-13 Oct 2026, fitted on its 81 h; planner shadowed from 11 Oct, live on one pump from 13 Oct 2026 (0.5.0). The second pump needs a fit of its own |
 | 3 | Optimise min flow per half-hour (dynamic programme over slab temperature) | Dec 2026 |
 
 ## Files
@@ -87,20 +105,28 @@ drifts, and an `input_boolean` turns the gate off from the dashboard.
 |---|---|
 | `underflow.py` | The AppDaemon app, i.e. the site: the decide and reconcile clocks, Agile prices and forecasts (fetched once per tick), liveness probes, alerts; runs each pump in turn |
 | `pump.py` | One heat pump: decide, reconcile and observe; publishes its sensors; calls its write script when the bus disagrees. No AppDaemon import |
-| `planner.py` | Stage 1 rules. Pure functions, no HA |
+| `planner.py` | The price planner (stage 1 rules, and the fallback). Pure |
+| `mpc.py` | The model planner: greedy 24 h plan of zone off or a min-flow level per slot. Pure |
+| `shadow.py` | Runs the model planner each tick: Kalman slab estimate, forecast cache, publishes the plan. Pure |
+| `forecast.py` | Met Office temperature and Solcast PV forecasts to half-hour slots, with offline fallbacks |
+| `testplan.py` | Step tests: fixed blocks of min flow or zone off, with floor and ceiling guards |
+| `targets.py` | Comfort band and test guards from HA `input_number` sliders |
+| `persist.py` | Saved state, so a restart keeps the target, slab estimate, gate and room offsets |
+| `datalog.py` | The 5-minute CSV log the models are fitted from |
 | `ebusd.py` | Client for ebusd's TCP command port (see below) |
 | `reconcile.py` | Given a target, a fresh reading and the link state, decide whether to write. Pure |
 | `demand.py` | Where the target comes from: the live model planner, a neighbouring controller (mirror) or the local price planner. Pure |
-| `shared.py` | Shadow demand source: steer by the neighbour's room sensor in small capped steps, limited both ways by this half's room mean. Pure |
+| `shared.py` | Shadow demand source (retired on the author's house): steer by the neighbour's room sensor in small capped steps. Pure |
 | `probe.py` | Is each device still on the bus? Uses ebusd's `lastup`, adds no bus traffic. Pure |
 | `hasafe.py` | Stops AppDaemon dropping zero and `False` attributes on the way to HA |
-| `rooms.py` | The comfort rooms: coldest and warmest, with a room that drops out estimated from the others at its usual offset. Pure |
-| `gate.py` | When the room thermostats should be allowed to call: off at the comfort top, on to boost or heat, following a step test. Pure |
+| `rooms.py` | The comfort rooms: coldest and warmest, with a room that drops out or freezes estimated from the others at its usual offset. Pure |
+| `gate.py` | When the room thermostats should be allowed to call: off when the model has heat off or at the comfort top, on to boost or heat, following a step test. Pure |
 | `narrative.py` | Plain-English status bullets, published as `sensor.underflow_whats_going_on` for a markdown card |
 | `model.py` | Stage 2: `HouseModel`, `fit_house`, `KalmanFilter`, `CopModel`, `fit_cop`, `flow_target` |
 | `tools/ha_dashboard.py` | Get or save a storage-mode dashboard over the websocket |
 | `tools/fetch_stats.py` | Export HA long-term statistics to CSV (needs `HASS_URL`, `HASS_TOKEN`) |
 | `tools/fit_from_csv.py` | Fit the house model to that CSV; an offline smoke test |
+| `tools/fit_log.py` | Fit house, emitter, COP and room spread from the data log and print the `model:` block for apps.yaml (`--outside house\|met`) |
 | `apps.example.yaml` | Example AppDaemon config, one pump |
 | `examples/two-pumps.yaml` | Example config for one app driving two pumps (`pumps:`) |
 | `docs/set_min_flow_temp.example.yaml` | Example write script with bounds and read-back |
@@ -119,12 +145,13 @@ Tests are standalone scripts: `uv run tests/<name>.py` (`test_model.py` also nee
 | `test_persist.py` | Saved state round-trips; a tripped step-test guard stays tripped across a restart; stale, corrupt or foreign state files are ignored |
 | `test_targets.py` | HA slider values override the comfort band and test guards; out-of-range, unparsable or upside-down values fall back to apps.yaml |
 | `test_testplan.py` | Step-test blocks start and end on schedule, "off" asks for the zone off, the floor guard trips and latches, the ceiling pauses a heat block and lets it resume 0.5 K under; the CSV log keeps one header per file |
-| `test_rooms.py` | A missing room is estimated at its offsets, follows the others, holds steady when a second drops, is left out after 12 h, gives nothing when nothing reports, and survives a restart |
+| `test_rooms.py` | A missing room is estimated at its offsets, follows the others, holds steady when a second drops, is left out after 12 h, gives nothing when nothing reports, and survives a restart; a frozen sensor is caught only when every other room moves, and is cleared by its first change |
+| `test_narrative.py` | The status text: comfort band, cheap windows, step test and model planner lines; the pump line follows the status code, not lagging power |
 | `test_gate.py` | The thermostat gate closes at the comfort top and reopens 0.3 K under it, opens to boost or at the floor, follows a step test, fails open, and holds non-urgent changes for the dwell |
 | `test_demand.py` | Model planner's level or heat off, comfort band binding on it; mirror held through a dropout, dropped when stale; caps and comfort band apply |
 | `test_shared.py` | Deadband, one step per tick, floor and cap, this half's rooms override the shared sensor |
 | `test_probe.py` | A steady value stays alive; blips are debounced; a missing device is found |
-| `test_pumps.py` | A one-pump apps.yaml works as before; two pumps get their own config plus the inherited site keys, nothing leaking; a pump pointed at a forbidden register is refused while the other starts; a pump that raises never stops the other; a slider re-decides its own pump only; comfort on the coldest available room; the thermostat gate decides, writes over HomeKit with the remembered setpoint, holds in flight, respects its switch and survives a restart; the house outside temperature with the Met Office fallback |
+| `test_pumps.py` | A one-pump apps.yaml works as before; two pumps get their own config plus the inherited site keys, nothing leaking; a pump pointed at a forbidden register is refused while the other starts; a pump that raises never stops the other; a slider re-decides its own pump only; comfort on the coldest available room; the thermostat gate decides, writes over HomeKit with the remembered setpoint, holds in flight, respects its switch and survives a restart; the house outside temperature with the Met Office fallback; the live model planner drives level, zone and thermostats and falls back to the price planner, including with no room reading; a room sensor dropping out or freezing is estimated, alerted once and dismissed on return |
 
 ### Synthetic test results
 
@@ -233,7 +260,7 @@ Keep the circuit sensor as a diagnostic (`flow_temp_circuit`), since it shows wh
 loops see, but don't feed it to the model.
 
 **Don't fit COP on hot-water cycles.** Hot water runs at 60–70 °C flow, space heating at
-about 30 °C, and mixing them fits `η` to the wrong conditions. `underflow.py` classifies
+about 30 °C, and mixing them fits `η` to the wrong conditions. `pump.py` classifies
 the HMU status as `idle`, `dhw`, `heating` or `cooling`, and `fit_cop(..., mode=...)`
 keeps only `heating`.
 
@@ -245,7 +272,9 @@ keeps only `heating`.
   and `HcNMaxFlowTempDesired` registers and the HMU's `CurrentConsumedPower` and
   `CurrentYieldPower` as HA entities.
 - Room temperature sensors in HA (Tado over HomeKit, Heatmiser, anything).
-- A weather entity and, for prices, the Octopus Energy integration.
+- A weather entity and, for prices, the Octopus Energy integration. The model planner
+  also uses the weather entity's hourly forecast and, optionally, Solcast's PV forecast as
+  a proxy for sun.
 - A Home Assistant **script** that writes the minimum flow temperature with bounds and
   a forced read-back. underflow only ever calls that script, never the register.
   Example in `docs/set_min_flow_temp.example.yaml`.
@@ -255,8 +284,8 @@ keeps only `heating`.
 1. Copy every top-level `*.py` file into AppDaemon's `apps/` directory.
 2. Copy `apps.example.yaml` to `apps/apps.yaml` and fill in your entity ids.
 3. Check the AppDaemon add-on's log. You should see
-   `underflow: initialised v0.1.0; dry_run=True; ... numeric stack: numpy …, scipy …`,
-   then a `plan:` line every half hour.
+   `underflow: initialised vX.Y.Z; pumps=[...]; ... numeric stack: numpy …, scipy …`,
+   then a `plan:` line per pump every half hour.
 
 Install from a [release](https://github.com/dabeeeenster/underflow/releases) rather than
 `main`, so you know which version is running: the status sensor's `version` attribute
@@ -304,11 +333,17 @@ running the app with the old settings.
 
 ## Safety
 
-- `dry_run: true` is the default and the only mode in stage 0.
+- `dry_run: true` is the default, for the pump and for the thermostat gate separately.
+- The comfort floor overrides every demand source, and skips the dwell.
+- Where information is missing, it fails towards heat: no room reading hands over to the
+  price planner with the thermostats on; no prices hold a neutral flow; missing forecasts
+  assume no sun.
 - underflow never writes a register directly. It calls a script you own, which enforces
   the bounds and reads the value back off the bus.
 - `forbid_registers` stops a pump starting if it is configured to touch a circuit it must
   never write.
+- Pair zone and thermostat switching with HA watchdogs that turn them back on if
+  underflow goes quiet or the house gets cold (see the gate notes above).
 - Before enabling any control stage, cap `MaxFlowTempDesired` on the heating circuit at
   what your floor can take (45 °C is usual for screed).
 
