@@ -126,6 +126,10 @@ rates = [(T0 + dt.timedelta(minutes=30 * k), 0.02 if k < 12 else 0.3) for k in r
 out = sh.plan(T0 + dt.timedelta(hours=1), rates, 20.0, 9.5)
 assert out["state"] in ("off", "20", "25", "32", "38") and len(out["slots"]) == 48, out["state"]
 assert out["predicted_coldest_3h"] is not None and any("sun" in n for n in out["notes"]), out["notes"]
+# the comfort-top slider lowers the planning ceiling (top + spread), never raises it (0.5.1)
+assert sh.plan(T0 + dt.timedelta(hours=1), rates, 20.0, 9.5, comfort_top=22.0)["top"] == 23.0
+assert sh.plan(T0 + dt.timedelta(hours=1), rates, 20.0, 9.5, comfort_top=23.0)["top"] == 23.5
+assert out["top"] == 23.5
 sh.observe(T0 + dt.timedelta(hours=3), 20.5, 0.0, 10.0, 0.0)    # 2 h gap: filter restarts on the reading
 assert abs(sh.room - 20.5) < 1e-9
 print("shadow OK: plan", out["state"], "now, coldest in 3 h", out["predicted_coldest_3h"], "slab", out["slab_estimate"])

@@ -80,8 +80,13 @@ class Shadow:
     def room(self):
         return None if self.kf.x is None else float(self.kf.x[1])
 
-    def plan(self, now, rates, floor, outside_now):
-        """rates: [(start, £/kWh)]. Returns a dict for publishing."""
+    def plan(self, now, rates, floor, outside_now, comfort_top=None):
+        """rates: [(start, £/kWh)]. Returns a dict for publishing.
+
+        `comfort_top` is the coldest-room comfort top (the slider). The warmest room is
+        planned to stay under it plus the room spread, and under `top`, whichever is
+        lower: the pump cuts any boost once the coldest room reaches the comfort top, so
+        heat planned above it would never be delivered (0.5.1)."""
         if self.kf.x is None:
             return {"state": "waiting", "reason": "no room reading yet"}
         slots = F.slot_starts(now, self.cfg.horizon_hours)
@@ -90,8 +95,9 @@ class Shadow:
         prices = [price_at.get(s) for s in slots]
         if all(p is None for p in prices):
             notes.append("no Agile prices: planning for comfort only")
+        top = self.cfg.top if comfort_top is None else min(self.cfg.top, comfort_top + self.cfg.mpc.spread)
         r = mpc_plan(self.cfg.params, self.cfg.mpc, self.slab, self.room, t_out, solar, prices,
-                     floor=floor, top=self.cfg.top, allow_off=self.cfg.allow_off)
+                     floor=floor, top=top, allow_off=self.cfg.allow_off)
         lvl = r.level_now
         h = lambda k: float(np.round(r.coldest[min(k, len(r.coldest) - 1)], 2))
         return {
@@ -101,7 +107,7 @@ class Shadow:
             "predicted_min": float(np.round(r.coldest[1:].min(), 2)),
             "slab_estimate": round(self.slab, 2), "room_estimate": round(self.room, 2),
             "elec_kwh_24h": round(r.elec_kwh, 2), "cost_24h_gbp": round(r.cost, 2),
-            "breaches": len(r.breaches), "over_top": len(r.over),
+            "breaches": len(r.breaches), "over_top": len(r.over), "top": round(top, 2),
             "notes": notes, "provisional": self.cfg.provisional,
             "slots": [{"start": s.isoformat(timespec="minutes"),
                        "level": ("off" if l == OFF else l),

@@ -803,14 +803,14 @@ class Pump:
                                           self.model_forecast.get("solcast", []))
             self.shadow.cache.offer(now, met=met or None, sol=sol or None)
             out = self.shadow.plan(now, rates, self.planner_cfg.comfort_min,
-                                   obs.get("outside_temp"))
+                                   obs.get("outside_temp"), comfort_top=self.planner_cfg.comfort_max)
             self._last_shadow = out
             state = out.pop("state")
             self._publish(self.model_entity, state, {
                 "friendly_name": f"{self.label} model planner ({role})", "icon": "mdi:brain",
                 "shadow": not self.model_live, "live": self.model_live,
                 "updated": now.isoformat(timespec="seconds"),
-                "floor": self.planner_cfg.comfort_min, "top": self.shadow.cfg.top, **out})
+                "floor": self.planner_cfg.comfort_min, **out})
             out["state"] = state
             for key, label in (("predicted_coldest_3h", "predicted coldest room in 3 h"),
                                ("slab_estimate", "estimated slab temperature")):

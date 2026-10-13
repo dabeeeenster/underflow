@@ -5,6 +5,15 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.5.1 — 2026-10-13
+
+- The model planner's ceiling follows the comfort top: the warmest room is planned to stay
+  under the comfort-top slider plus the room spread, or `model.top`, whichever is lower.
+  The pump cuts a boost once the coldest room reaches the comfort top, so heat planned
+  above it was never delivered: on 179 at 21:36 on 13 Oct 2026 the plan had 32 °C at
+  22:00 with the coldest room at 22.5 against a 22 °C top. The plan's `top` attribute is
+  the ceiling actually used.
+
 ## 0.5.0 — 2026-10-13
 
 - **Model planner live** (`model.live: true`): the stage-2 model planner's plan for the
