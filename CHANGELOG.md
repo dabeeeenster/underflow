@@ -5,6 +5,16 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.5.2 — 2026-10-13
+
+- Narrative: the heat-pump line follows the HMU's run-data status code, which is polled
+  every ~10 s, rather than the power readings, which lag it by minutes. Until now a
+  compressor that had just started read "not running (heat_compressor_active)" (177, 21:37
+  on 13 Oct 2026), and one that had just stopped could still read as heating. Each phase
+  has its own wording (starting a run, heating, pump overrun, blocked after a run,
+  compressor off, standby); power and COP figures are quoted only while the compressor
+  runs, with a note when they haven't caught up yet.
+
 ## 0.5.1 — 2026-10-13
 
 - The model planner's ceiling follows the comfort top: the warmest room is planned to stay

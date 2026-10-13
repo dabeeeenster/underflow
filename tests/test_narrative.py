@@ -33,4 +33,18 @@ lines4 = describe(obs, p, now, cfg, dry_run=True, notes=["Havenwise stopped 12 O
 assert lines4[-2] == "Havenwise stopped 12 Oct." and lines4[-1].startswith("Stage 1"), lines4
 lines2 = describe(obs2, plan([], now, None, cfg), now, cfg, dry_run=False)
 assert any("standby" in l for l in lines2) and any("No Agile prices" in l and "comfort band still applies" in l for l in lines2)
+# The status code decides the words; power only adds figures (0.5.2). 177 at 21:37 on
+# 13 Oct 2026 read "not running (heat_compressor_active)" because its power lagged.
+from narrative import _pump_line
+lag = {"pump_status": "heat_compressor_active", "power_in_kw": 0.0, "power_out_kw": 0.0, "flow_temp": 27.4}
+assert _pump_line(lag) == "The heat pump is heating the house, flow at 27 °C; its power readings haven't caught up yet.", _pump_line(lag)
+assert "drawing 1.7 kW" in _pump_line(obs) and "heating the house" in _pump_line(obs)
+assert _pump_line({"pump_status": "heat_compressor_blocked", "power_in_kw": 1.2, "power_out_kw": 4.0}) == \
+    "The heat pump is pausing between heating runs (compressor blocked after a run)."
+assert _pump_line({"pump_status": "hwc_compressor_active", "power_in_kw": 2.0, "power_out_kw": 5.0}).startswith("The heat pump is heating hot water: drawing 2.0 kW")
+assert _pump_line({"pump_status": "hwc_prerun"}) == "The heat pump is starting a hot water run."
+assert _pump_line({"pump_status": "heat_overrun"}) == "The heat pump is finishing a heating run (pump overrun)."
+assert _pump_line({"pump_status": "heat_compressor_shutdown"}) == "The heat pump is between heating runs (compressor off)."
+assert _pump_line({"pump_status": "standby", "power_in_kw": 1.0, "power_out_kw": 3.0}) == "The heat pump is in standby."
+assert _pump_line({"pump_status": "frost_protection"}) == "The heat pump is not running (frost_protection)."
 print("narrative OK")

@@ -49,6 +49,38 @@ def _dur(a: dt.datetime, b: dt.datetime):
     return f"{h} hour{'s' if h != 1 else ''}" + (f" {r} min" if r else "")
 
 
+# What the HMU's run-data status code says the pump is doing. The code is polled every ~10 s;
+# the power readings lag it by minutes, so the code decides the words and the power figures
+# are only quoted while the compressor runs. (Until 0.5.2 the power decided, and a compressor
+# just started read "not running (heat_compressor_active)": 177, 13 Oct 2026.)
+_PHASES = (("compressor_active", "{active}"), ("prerun", "starting a {job} run"),
+           ("overrun", "finishing a {job} run (pump overrun)"),
+           ("compressor_blocked", "pausing between {job} runs (compressor blocked after a run)"),
+           ("compressor_shutdown", "between {job} runs (compressor off)"))
+
+
+def _pump_line(obs: dict) -> str:
+    status = (obs.get("pump_status") or "unknown").strip().lower()
+    pin, pout, cop, flow = obs.get("power_in_kw"), obs.get("power_out_kw"), obs.get("cop_now"), obs.get("flow_temp")
+    if status == "standby":
+        return "The heat pump is in standby."
+    hot = "hwc" in status or "dhw" in status
+    job, active = ("hot water", "heating hot water") if hot else ("heating", "heating the house")
+    phase = next((t for key, t in _PHASES if key in status), None)
+    if phase is None:
+        if pin and pout and pin > 0.2:
+            return f"The heat pump is running ({status}): drawing {pin:.1f} kW and delivering {pout:.1f} kW."
+        return f"The heat pump is not running ({status})."
+    doing = phase.format(job=job, active=active)
+    if "compressor_active" not in status:
+        return f"The heat pump is {doing}."
+    flow_txt = f", flow at {flow:.0f} °C" if flow is not None else ""
+    if pin and pout and pin > 0.2:
+        cop_txt = f" for a COP of {cop:.1f}" if cop else ""
+        return f"The heat pump is {doing}: drawing {pin:.1f} kW and delivering {pout:.1f} kW{cop_txt}{flow_txt}."
+    return f"The heat pump is {doing}{flow_txt}; its power readings haven't caught up yet."
+
+
 def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage: str = "1",
              test: dict | None = None, room_label: str = "the house",
              notes: list[str] | None = None, gate: dict | None = None,
@@ -69,15 +101,7 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
         lines.append(f"It is {out:.1f} °C outside and {room_label} is at {room:.1f} °C, {where} the comfort band of {band}.")
 
     # --- heat pump
-    status = obs.get("pump_status") or "unknown"
-    pin, pout, cop, flow = obs.get("power_in_kw"), obs.get("power_out_kw"), obs.get("cop_now"), obs.get("flow_temp")
-    if pin and pout and pin > 0.2:
-        what = "heating hot water" if "hwc" in status else "heating the house" if "hc" in status or "heat" in status else f"running ({status})"
-        cop_txt = f" for a COP of {cop:.1f}" if cop else ""
-        lines.append(f"The heat pump is {what}: drawing {pin:.1f} kW and delivering {pout:.1f} kW{cop_txt}, flow at {flow:.0f} °C." if flow is not None
-                     else f"The heat pump is {what}: drawing {pin:.1f} kW and delivering {pout:.1f} kW{cop_txt}.")
-    else:
-        lines.append("The heat pump is in standby." if status == "standby" else f"The heat pump is not running ({status}).")
+    lines.append(_pump_line(obs))
 
     # --- prices
     rate = obs.get("agile_rate_now"); slots = plan.get("slots") or []
