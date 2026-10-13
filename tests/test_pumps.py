@@ -391,6 +391,26 @@ clock[0] = NOW + dt.timedelta(minutes=45)
 p._observe()
 assert any(s == "persistent_notification/dismiss" and "room_" in kw["notification_id"] for s, kw in a.calls)
 assert p.room_reading.coldest == 19.9 and not p._room_alerts
+# a frozen sensor (0.6.1): Upstairs stuck at 20.2 while Kitchen and Tanya warm 0.3 K/h
+a = app(two, dict(states, **{KIT: "21.3", UPS: "20.2", TAN: "21.0"}))
+p = a.pumps["177"]
+clock = [NOW]
+a.datetime = lambda aware=True: clock[0]
+for k in range(0, 5 * 12 + 1):
+    h = k / 12
+    clock[0] = NOW + dt.timedelta(hours=h)
+    a.states[KIT], a.states[TAN] = f"{21.3 + 0.3 * h:.1f}", f"{21.0 + 0.3 * h:.1f}"
+    p._observe()
+UPN = UPS.split(".", 1)[1]                          # list config: rooms named by entity
+assert UPN in p.room_reading.stuck and p.room_reading.coldest > 20.2, p.room_reading
+stuck_alerts = [kw for kw in alerts(a) if "looks stuck" in kw["message"]]
+assert len(stuck_alerts) == 1 and "looks stuck" in stuck_alerts[0]["message"], stuck_alerts
+p.decide()
+assert "looks stuck" in a.published["sensor.underflow_177_whats_going_on"][1]["text"]
+a.states[UPS] = "21.6"                              # it moves: cleared, alert dismissed
+clock[0] += dt.timedelta(minutes=5)
+p._observe()
+assert not p.room_reading.stuck and p.room_reading.coldest == 21.6 and not p._room_alerts
 # HA restart with the Tados not back yet: no alert inside the first 30 min
 a = app(two, dict(states, **{KIT: "unavailable", UPS: "unavailable", TAN: "unavailable"}))
 p = a.pumps["177"]

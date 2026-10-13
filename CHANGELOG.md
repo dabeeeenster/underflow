@@ -5,6 +5,24 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.6.1 — 2026-10-13
+
+- **A frozen room sensor is caught** (`rooms.py`). A sensor that keeps reporting the same
+  value while every other room moves is treated like a missing one: estimated from the
+  others, from its offsets as they were before it froze, with an alert. The rule is
+  unchanged for `rooms.stuck_hours` (default 4) while *every* other room has moved
+  `rooms.stuck_move` (default 1.0 K) or more. A flat reading alone isn't enough: overnight
+  every Tado sat on one value for 8-12 h with the house steady. Most rooms moving isn't
+  enough either: on 13 Oct 177's Lotte stayed at 22.0 for 6 h, genuinely, while sun lifted
+  two other rooms.
+  - Replayed over the 10-13 Oct logs it flags nothing. In simulated 8 h freezes of each 179
+    Tado it caught 39-41 of the 52-69 that would have ended 0.5 K or more wrong, after a
+    median 4.2-4.6 h. Its estimate's error was 0.48-0.64 K against 1.26-1.66 K for the
+    frozen value. On 177 (1.5 days of data) the estimate was worse than the frozen value
+    for Tanya, so treat 177's estimates with care until there is more data.
+  - The first change in the reading clears it. Status attribute `rooms_stuck_hours`; a
+    narrative line; the alert says it looks stuck.
+
 ## 0.6.0 — 2026-10-13
 
 - **Carry on when a room sensor drops out** (`rooms.py`). With `entities.comfort_rooms`, a

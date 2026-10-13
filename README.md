@@ -282,8 +282,10 @@ Per pump:
   It's an alternative to a `room_mean` sensor. A room that drops out is estimated from the
   others at its usual offset from each (`rooms.py`, 0.6.0) for up to
   `rooms.estimate_hours` (default 12), then left out; after `rooms.alert_minutes` (default
-  30) offline there is an alert, dismissed when it reports again. Rooms you only want
-  logged go in `datalog.columns`.
+  30) offline there is an alert, dismissed when it reports again. A room whose reading
+  hasn't changed for `rooms.stuck_hours` (default 4) while every other room has moved
+  `rooms.stuck_move` (default 1.0 K) is treated the same way, as stuck (0.6.1). Rooms you
+  only want logged go in `datalog.columns`.
 - `zone.mode_on` / `zone.mode_off` are what the zone select calls on and off (default
   `day` / `off`).
 - `entities.outside_sensors: {name: entity}` lists outside sensors to log as

@@ -104,8 +104,11 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
 
     if rooms is not None:
         for n, v in rooms.estimated.items():
-            mins = rooms.missing.get(n)
-            lines.append(f"{n}'s room sensor is offline ({mins} min); it is estimated at {v:.1f} °C from the other rooms.")
+            if n in rooms.stuck:
+                lines.append(f"{n}'s room sensor looks stuck (unchanged {rooms.stuck[n]:.1f} h while the other rooms moved); "
+                             f"it is estimated at {v:.1f} °C from them.")
+            else:
+                lines.append(f"{n}'s room sensor is offline ({rooms.missing.get(n)} min); it is estimated at {v:.1f} °C from the other rooms.")
         if rooms.dropped:
             lines.append(f"Left out, offline too long to estimate: {', '.join(rooms.dropped)}.")
 

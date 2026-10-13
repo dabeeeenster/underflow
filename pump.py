@@ -329,7 +329,7 @@ class Pump:
         r = self.room_reading = self.room_tracker.update(now, {n: self._num(e) for n, e in cfg.rooms})
         self._rooms_since = self._rooms_since or now
         for n, mins in r.missing.items():
-            state = "dropped" if n in r.dropped else "estimated"
+            state = "dropped" if n in r.dropped else "stuck" if n in r.stuck else "estimated"
             # A room not seen since start counts from the start: after an HA restart the
             # thermostats can be unavailable for a minute while HomeKit reconnects.
             waited = mins if mins is not None else (now - self._rooms_since).total_seconds() / 60
@@ -338,7 +338,15 @@ class Pump:
             if self._room_alerts.get(n) == state:
                 continue
             self._room_alerts[n] = state
-            if state == "estimated":
+            if state == "stuck":
+                frozen = self.room_tracker.seen[n].value
+                msg = (f"{n}'s room sensor has read {frozen:.1f} °C for {r.stuck[n]:.1f} h while every other room "
+                       f"moved {cfg.stuck_move:g} °C or more, so it looks stuck. underflow is estimating it at "
+                       f"{r.estimated[n]:.1f} °C from the other rooms until its reading changes."
+                       if n in r.estimated else
+                       f"{n}'s room sensor has read {frozen:.1f} °C for {r.stuck[n]:.1f} h while every other room "
+                       f"moved {cfg.stuck_move:g} °C or more, so it looks stuck; comfort is judged without it.")
+            elif state == "estimated":
                 msg = (f"{n}'s room sensor has been unavailable for {mins} min. underflow is estimating it "
                        f"at {r.estimated[n]:.1f} °C from the other rooms (its usual offset from them), "
                        f"for up to {cfg.estimate_hours:g} h.")
@@ -396,6 +404,7 @@ class Pump:
             obs["rooms_estimated"] = rr.estimated or None
             obs["rooms_missing_minutes"] = rr.missing or None
             obs["rooms_dropped"] = rr.dropped or None
+            obs["rooms_stuck_hours"] = rr.stuck or None
         obs["mode"] = self._mode(obs["pump_status"])
         pin, pout = obs["power_in_kw"], obs["power_out_kw"]
         obs["cop_now"] = round(pout / pin, 2) if pin and pout and pin > 0.2 else None
