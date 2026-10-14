@@ -93,6 +93,8 @@ underflow:
         hysteresis: 0.3
         min_dwell_minutes: 30
         enable_entity: input_boolean.underflow_179_thermostat_gate
+        # max_setpoints:       # the most each is reopened at, whatever its own schedule says
+        #   climate.tado_smart_thermostat_ru1870089728: 22
         dry_run: true          # watch first; the pump itself is live
       model:
         live: false            # true: the plan drives the pump (0.5.0); false: shadow only

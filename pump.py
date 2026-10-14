@@ -679,7 +679,7 @@ class Pump:
             if st == g.mode_on:
                 sp = self._num(e, "temperature")
                 if sp is not None:
-                    self.gate_setpoints[e] = sp
+                    self.gate_setpoints[e] = g.cap(e, sp)
             if self.gate_open is None:
                 continue
             want = g.mode_on if self.gate_open else g.mode_off
@@ -819,7 +819,8 @@ class Pump:
             gs = doc.get("gate")
             if self.gate_cfg is not None and gs:
                 self.gate_open, self.gate_since = gs.get("open"), persist._dt(gs.get("since"))
-                self.gate_setpoints = {k: float(v) for k, v in (gs.get("setpoints") or {}).items()
+                self.gate_setpoints = {k: self.gate_cfg.cap(k, float(v))
+                                       for k, v in (gs.get("setpoints") or {}).items()
                                        if k in self.gate_cfg.climates}
                 if self.gate_open is not None:
                     restored.append(f"thermostats {'on' if self.gate_open else 'off'}")

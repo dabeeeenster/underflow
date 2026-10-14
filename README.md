@@ -323,7 +323,8 @@ Per pump:
   narrative use (logged as `outside_temp`). Without it, or while it is unavailable, they
   use the weather entity's current reading.
 - `gate:` switches room thermostats on and off (`climates`, `mode_on`/`mode_off`,
-  `hysteresis`, `min_dwell_minutes`, `enable_entity`, its own `dry_run`). See
+  `hysteresis`, `min_dwell_minutes`, `enable_entity`, its own `dry_run`, and
+  `max_setpoints: {climate: °C}`, the most it remembers for each one to reopen at). See
   `examples/two-pumps.yaml`. Pair it with an HA watchdog that turns the thermostats back
   on if underflow stops publishing.
 

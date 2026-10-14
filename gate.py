@@ -8,7 +8,9 @@ to their maximums (or 25 °C for the step test) they call all day, so that pump 
 around the clock in mild weather, circulating with nothing to deliver.
 
 The gate closes the thermostats when underflow has no reason to heat and opens them when
-it does. Their setpoints are left alone: open, each Tado still caps its own room.
+it does. Their setpoints are left alone: open, each Tado still caps its own room. The
+setpoint it sends when reopening one is the last seen while on, no higher than
+`max_setpoints` (0.6.2).
 
   * step test running   -> follow it: open in a heat block, closed when the block is off
                            or paused at the ceiling
@@ -39,6 +41,10 @@ class GateConfig:
     # reports a Tado's setpoint as null while it is off, so the gate remembers each one
     # while it is on; this is only for a thermostat never seen on.
     default_setpoint: float | None = None
+    # Highest setpoint to remember for each thermostat, {entity: °C} (0.6.2). A Tado whose
+    # own schedule wakes it at a higher setpoint would otherwise teach the gate that value
+    # and get it back at every reopen (179's Living Room, 14 Oct 2026: 25 °C).
+    max_setpoints: dict = field(default_factory=dict)
     enable_entity: str | None = None   # input_boolean: off = leave the thermostats alone
     dry_run: bool | None = None        # None = the pump's dry_run
 
@@ -48,11 +54,17 @@ class GateConfig:
             return None
         a = dict(args)
         a["climates"] = tuple(a["climates"])
+        a["max_setpoints"] = {str(k): float(v) for k, v in (a.get("max_setpoints") or {}).items()}
         # YAML 1.1 reads a bare `off` as False.
         for k, default in (("mode_on", "heat"), ("mode_off", "off")):
             v = a.get(k)
             a[k] = default if v is None else ("off" if v is False else "on" if v is True else str(v))
         return cls(**{k: v for k, v in a.items() if k in cls.__dataclass_fields__})
+
+    def cap(self, entity: str, setpoint: float) -> float:
+        """`setpoint`, no higher than the thermostat's `max_setpoints` entry."""
+        top = self.max_setpoints.get(entity)
+        return setpoint if top is None else min(setpoint, top)
 
 
 @dataclass(frozen=True)

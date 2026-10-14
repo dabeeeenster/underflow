@@ -295,6 +295,16 @@ with tempfile.TemporaryDirectory() as d:
     cfg179["state_file"] = path
     q = P.Pump(a, "179", cfg179, "test", True)
     assert q.gate_open is True and q.gate_setpoints == {e: 25.0 for e in TADOS}, (q.gate_open, q.gate_setpoints)
+    # 0.6.2: max_setpoints caps what is restored, and what is learned while on
+    cfg179["gate"] = dict(cfg179["gate"], max_setpoints={TADOS[0]: 22, TADOS[1]: 21})
+    q = P.Pump(a, "179", cfg179, "test", True)
+    assert q.gate_setpoints == {TADOS[0]: 22.0, TADOS[1]: 21.0, TADOS[2]: 25.0}, q.gate_setpoints
+    a.states["input_boolean.underflow_179_thermostat_gate"] = "on"
+    for e in TADOS:
+        a.states[e] = {"state": "heat", "temperature": 25, "hvac_action": "heating"}
+    q.gate_setpoints = {}
+    q.reconcile()
+    assert q.gate_setpoints == {TADOS[0]: 22.0, TADOS[1]: 21.0, TADOS[2]: 25.0}, q.gate_setpoints
 
 # --- the live model planner (0.5.0): its plan drives the pump, the price planner stands in -
 ZONE = "select.heating_ebusd179_ctlv2_z1opmode"

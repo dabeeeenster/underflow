@@ -5,6 +5,16 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.6.2 — 2026-10-14
+
+- **A cap on the setpoints the gate remembers** (`gate.max_setpoints: {climate: °C}`). The
+  gate reopens each thermostat at the setpoint it last saw while it was on. 179's Living
+  Room Tado switched itself to heat at 25 °C at 00:17, 11:00 and 17:05 on 14 Oct (its own
+  schedule, outlasting HomeKit's "off"); each time the gate put it back off within 5 min,
+  but it remembered 25, and the 03:00-05:00 heat block ran that room at 25 instead of 22.
+  Learned and restored setpoints are now held at or under the cap. Rooms without an entry
+  are unchanged.
+
 ## 0.6.1 — 2026-10-13
 
 - **A frozen room sensor is caught** (`rooms.py`). A sensor that keeps reporting the same
