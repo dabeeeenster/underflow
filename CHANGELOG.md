@@ -5,6 +5,16 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.6.3 — 2026-10-17
+
+- **The step-test floor alert says what happened in plain words.** When the floor guard
+  cut a heating-off block short, the alert went out under the generic title
+  "underflow 177 (Hc2MinFlowTempDesired) needs a look", which read like a fault in the
+  min-flow register. It is now "underflow 177 step test: heating back on early", naming
+  the coldest room, the flow the heating is back on at and when the block ends, and says
+  there is nothing to do. It has its own notification id (`underflow_177_step_test`), so
+  it no longer replaces a real register alert. Still once per block.
+
 ## 0.6.2 — 2026-10-14
 
 - **A cap on the setpoints the gate remembers** (`gate.max_setpoints: {climate: °C}`). The

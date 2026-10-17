@@ -220,6 +220,22 @@ for warm, capped, zone in (("24.4", True, "off"), ("23.2", True, "off"), ("22.9"
 assert p.step.min_flow == 38
 assert any("block resumes" in m for _, m in a.logs), a.logs[-5:]
 
+# --- step-test floor guard: one plain alert per abandoned off block (0.6.3) --------------
+# 17 Oct 2026: "underflow 177 (Hc2MinFlowTempDesired) needs a look" read like a fault.
+a = app(two, states)
+p = a.pumps["177"]
+p.test_cfg = TP.TestConfig.from_args({"enabled": True, "start": (NOW - dt.timedelta(hours=1)).isoformat(),
+                                      "blocks": [[3, "off"]], "floor": 21.5, "guard_flow": 32})
+p.room_reading = types.SimpleNamespace(values={"Kitchen": 21.9, "Lotte": 21.4, "Lobby": None}, warmest=21.9)
+for _ in range(2):
+    p._update_step({"room_temp_mean": 21.4}, NOW)
+assert p.step.guarded and p.step.zone == "day" and p.step.min_flow == 32, p.step
+guard = [kw for kw in alerts(a) if kw["notification_id"] == "underflow_177_step_test"]
+assert len(guard) == 1, guard                                   # once per block, not per tick
+assert guard[0]["title"] == "underflow 177 step test: heating back on early", guard[0]
+assert "Lotte 21.4 °C" in guard[0]["message"] and "nothing to do" in guard[0]["message"], guard[0]
+assert "until the block ends at 14:00" in guard[0]["message"], guard[0]
+
 # --- dwell: the tick a full dwell after a write moves on (0.3.2) -------------------------
 # 177 wrote 32 at 15:30:06 on 12 Oct 2026; at 16:00:05 it held "for another 0 min".
 a = app(two, states)

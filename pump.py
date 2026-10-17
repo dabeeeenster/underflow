@@ -599,7 +599,7 @@ class Pump:
             k = persist.block_key(step.block)
             if step.guarded and not persist.same_block(self._guard_block, step.block):
                 self.log(f"step test guard: {step.reason}", level="WARNING")
-                self._alert(f"{self.label} test: {step.reason}")
+                self._test_guard_alert(step)
                 self._guard_block = k
             if step.capped and not persist.same_block(self._cap_block, step.block):
                 self.log(f"step test ceiling: {step.reason}")
@@ -1012,6 +1012,23 @@ class Pump:
                           variables={"flow_temp": value, "quiet": True})
         # The next reconcile must see the wire, not a cache that predates the write.
         self._force_next_read = True
+
+    def _test_guard_alert(self, step):
+        """The floor guard working as designed: say so plainly, with nothing for Ben to fix.
+        The generic `_alert` title named the min-flow register, which read like a fault
+        (17 Oct 2026)."""
+        cfg, b = self.test_cfg, step.block
+        vals = {n: v for n, v in (self.room_reading.values if self.room_reading else {}).items() if v is not None}
+        cold = min(vals, key=vals.get) if vals else None
+        room = f" ({cold} {vals[cold]:.1f} °C)" if cold else ""
+        who = f"{self.name}_" if self.name else ""
+        self.app.alert(
+            f"{self.label} step test: heating back on early",
+            f"During a heating-off test block the house cooled to the {cfg.floor:g} °C floor{room}, "
+            f"so the heating is back on at {cfg.guard_flow:g} °C until the block ends at "
+            f"{b.end:%H:%M} (block {b.index + 1} of {len(cfg.blocks)}). "
+            "This is the test's safety net working; nothing to do.",
+            f"underflow_{who}step_test")
 
     def _alert(self, message):
         who = f"{self.name} " if self.name else ""
