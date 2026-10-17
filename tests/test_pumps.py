@@ -530,3 +530,30 @@ p.energy_cfg = dataclasses.replace(p.energy_cfg, live=True)
 p.decide()
 assert p.source == "energy" and p.desired == p.planner_cfg.boost and "raised to" in p.source_reason, (p.desired, p.source_reason)
 print("ok: energy planner shadow publishes only, live drives the min flow, comfort floor binds on top")
+
+# --- today's need, fixed at midnight and held (0.7.2) -------------------------------------
+cfg2 = _copy.deepcopy(two)
+cfg2["pumps"]["177"]["energy"] = dict(ECFG)
+a = app(cfg2, states)
+p = a.pumps["177"]
+mid = NOW.replace(hour=0, minute=0, second=0)
+a.forecasts = lambda weather, solcast: ([(mid + dt.timedelta(hours=h), 8.0) for h in range(40)], None)
+ent = "sensor.underflow_177_energy_plan_need_today"
+p._energy_day(mid + dt.timedelta(minutes=5), a.forecasts(None, None)[0])
+assert a.published[ent][0] == str(round(0.37 * 5.3 * 24, 1)), a.published[ent]
+a.forecasts = lambda weather, solcast: ([(mid + dt.timedelta(hours=h), 2.0) for h in range(40)], None)
+p._energy_day(mid + dt.timedelta(hours=9), a.forecasts(None, None)[0])          # forecast changed: held
+assert a.published[ent][0] == str(round(0.37 * 5.3 * 24, 1)), a.published[ent]
+p._energy_day(mid + dt.timedelta(days=1, hours=10), a.forecasts(None, None)[0])   # next day first seen at 10:00
+assert a.published[ent][0] == "unavailable" and "tomorrow" in a.published[ent][1]["why_none"], a.published[ent]
+with tempfile.TemporaryDirectory() as tmp:                                       # survives a restart
+    p._energy_today = {"date": NOW.date().isoformat(), "kwh": 30.1, "outside_mean": 9.0, "made_at": "x"}
+    p.state_file = os.path.join(tmp, "s.json")
+    p._save_state(NOW)
+    q = app(cfg2, states).pumps["177"]
+    q.state_file = p.state_file
+    q.datetime = lambda aware=True: NOW + dt.timedelta(minutes=1)
+    q._restore_state()
+    q._energy_day(NOW + dt.timedelta(minutes=1), None)
+    assert q.app.published[ent][0] == "30.1", q.app.published[ent]
+print("ok: today's need is fixed at midnight, held through forecast changes and restarts, none for a day first seen late")

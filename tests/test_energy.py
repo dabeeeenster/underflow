@@ -8,7 +8,7 @@ share taken off, the rest bought in the cheapest slots, 32 before 38 in any slot
 price cap and free slots honoured, a short price horizon planning a short day."""
 import sys, pathlib, datetime as dt
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from energy import EnergyConfig, plan_energy
+from energy import EnergyConfig, day_need, plan_energy
 
 tz = dt.timezone.utc
 now = dt.datetime(2026, 10, 17, 10, 5, tzinfo=tz)
@@ -83,4 +83,12 @@ for bad in ({32: {"kw": 1.2, "cop": 3.2}, 38: {"kw": 1.0, "cop": 2.8}},     # he
     except ValueError:
         pass
 
+# --- the whole day's need, for the daily check: needs most of the day forecast ---------
+midnight = dt.datetime(2026, 10, 18, 0, 0, tzinfo=tz)
+d = day_need([(midnight + dt.timedelta(hours=h), 8.0) for h in range(25)], midnight, cfg)
+assert d == {"kwh": round(0.37 * 5.3 * 24, 1), "outside_mean": 8.0, "forecast_hours": 24.0}, d
+assert day_need([(midnight + dt.timedelta(hours=h), 8.0) for h in range(12)], midnight, cfg) is None
+assert day_need(None, midnight, cfg) is None
+
+print("ok: day's need from a full-day forecast only;", end=" ")
 print("ok: need from the forecast mean, curve share off, cheapest slots bought, cap, free slots, short horizon, fallbacks, config checks")

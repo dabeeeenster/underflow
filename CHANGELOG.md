@@ -5,6 +5,17 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.7.2 — 2026-10-17
+
+- **Today's heat need, predicted at midnight and held** (`sensor.<pump>_energy_plan_need_today`,
+  kWh). In the first hour of each day the energy planner works out the whole calendar
+  day's need from the temperature forecast (only if the forecast covers at least 20 of
+  the 24 hours) and keeps it until the next midnight, through forecast changes and
+  restarts (saved state). Charted against the pump's delivered heating heat per day
+  (e.g. `sensor.177_heat_yield_heating`, the ebusd `YieldHc` counter), it shows whether
+  the energy planner's line holds before it is made live. A day first seen after 01:00
+  gets no prediction (`why_none` says so) rather than one made with half the day gone.
+
 ## 0.7.1 — 2026-10-17
 
 - "What's going on" no longer says the curve covers the day when the energy planner buys

@@ -100,6 +100,21 @@ class EnergyPlan:
         }
 
 
+def day_need(met: list[tuple[dt.datetime, float]] | None, day_start: dt.datetime,
+             cfg: EnergyConfig) -> dict | None:
+    """The whole calendar day's heat need from the forecast, made at the start of the day
+    and held, so it can be checked against what the pump delivers that day (0.7.2). None
+    unless the forecast covers at least 20 of the 24 hours: a guess from a scrap of
+    forecast would make the comparison meaningless."""
+    temps = [_temp_at(met, day_start + SLOT * i + SLOT / 2) for i in range(48)] if met else []
+    known = [t for t in temps if t is not None]
+    if len(known) < 40:
+        return None
+    mean_t = sum(known) / len(known)
+    return {"kwh": round(cfg.need_kw(mean_t) * 24, 1), "outside_mean": round(mean_t, 1),
+            "forecast_hours": len(known) / 2}
+
+
 def plan_energy(rates: list[tuple[dt.datetime, float]], met: list[tuple[dt.datetime, float]] | None,
                 now: dt.datetime, outside_now: float | None, cfg: EnergyConfig) -> EnergyPlan | None:
     """The cheapest way to deliver the next `horizon_hours` of heat, or None with no prices.

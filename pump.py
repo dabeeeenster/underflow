@@ -21,7 +21,7 @@ from hasafe import ha_safe
 from ebusd import MAX_CLOCK_SKEW, Ebusd
 from reconcile import ReconcileConfig, RegisterState, decide
 from demand import Held, MirrorConfig, choose, from_energy, from_model, hold
-from energy import EnergyConfig, plan_energy
+from energy import EnergyConfig, day_need, plan_energy
 from shared import SharedConfig, shared_step
 from testplan import TestConfig, Step, test_step, current_block
 import gate as G
@@ -231,6 +231,7 @@ class Pump:
             except Exception as exc:
                 self.log(f"energy config rejected: {exc!r}", level="WARNING")
         self._last_energy = None
+        self._energy_today = None      # {"date", "kwh", "outside_mean", "made_at", ...}: today's need, fixed at midnight
         self._predictions = []     # [(made_at, for_at, coldest °C)]: 3 h predictions awaiting their hour
         self._write_at = None
 
@@ -823,6 +824,8 @@ class Pump:
                 st["forecast"] = {"met": persist.series_out(c.met), "met_at": c.met_at,
                                   "sol": persist.series_out(c.sol), "sol_at": c.sol_at}
                 st["predictions"] = [[a.isoformat(), b.isoformat(), v] for a, b, v in self._predictions]
+            if self._energy_today:
+                st["energy_today"] = self._energy_today
             persist.save(self.state_file, st, now)
         except Exception as exc:          # never let persistence take control down
             self.log(f"state save failed: {exc!r}", level="WARNING")
@@ -873,6 +876,9 @@ class Pump:
                 c.met, c.met_at = persist.series_in(fc.get("met")), persist._dt(fc.get("met_at"))
                 c.sol, c.sol_at = persist.series_in(fc.get("sol")), persist._dt(fc.get("sol_at"))
                 restored.append("forecasts")
+            if doc.get("energy_today"):
+                self._energy_today = dict(doc["energy_today"])
+                restored.append(f"today's predicted need ({self._energy_today.get('kwh', 'none')})")
             preds = [(persist._dt(a), persist._dt(b), float(v)) for a, b, v in doc.get("predictions") or []]
             self._predictions = [p for p in preds if p[0] and p[1]]
             if self._predictions:
@@ -948,6 +954,7 @@ class Pump:
         if cfg is None:
             return None
         role = "live" if cfg.live else "shadow"
+        met = None
         try:
             met, _ = self.app.forecasts(cfg.weather, []) if cfg.weather else (None, None)
             p = plan_energy(rates, met, now, obs.get("outside_temp"), cfg)
@@ -955,6 +962,7 @@ class Pump:
             self.log(f"energy plan failed: {exc!r}", level="WARNING")
             p = None
         self._last_energy = p
+        self._energy_day(now, met)
         attrs = {"friendly_name": f"{self.label} energy planner ({role})", "icon": "mdi:lightning-bolt-circle",
                  "live": cfg.live, "updated": now.isoformat(timespec="seconds"),
                  "heat_loss_kw_per_k": cfg.heat_loss, "balance_point": cfg.balance_point}
@@ -971,6 +979,31 @@ class Pump:
                  f"{s['horizon_hours']} h at {s['outside_mean']} °C, curve {s['curve_kwh']}, bought "
                  f"{s['boosted_slots']} slots, ~£{s['cost_gbp']}" + (f"; {'; '.join(s['notes'])}" if s["notes"] else ""))
         return p
+
+    def _energy_day(self, now, met):
+        """Today's heat need, worked out once in the first hour of the day and held until
+        midnight, for the daily predicted-vs-delivered chart (0.7.2). A day first seen
+        later than that (a deploy, or a restart without saved state) gets no prediction
+        rather than one made with half the day gone."""
+        cfg, today = self.energy_cfg, now.date().isoformat()
+        e = self._energy_today
+        if not e or e.get("date") != today:
+            e = {"date": today}
+            if now.hour < 1:
+                start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                d = day_need(met, start, cfg)
+                if d:
+                    e.update(d, made_at=now.isoformat(timespec="minutes"))
+                else:
+                    e["why"] = "no forecast covering the day at midnight"
+            else:
+                e["why"] = "underflow started after midnight; the first prediction is tomorrow's"
+            self._energy_today = e
+        self._publish(f"{self.energy_entity}_need_today", e.get("kwh", "unavailable"), {
+            "friendly_name": f"{self.label} energy planner: heat needed today, predicted at midnight",
+            "unit_of_measurement": "kWh", "state_class": "measurement", "icon": "mdi:calendar-today",
+            "date": e["date"], "outside_mean_forecast": e.get("outside_mean"), "made_at": e.get("made_at"),
+            "why_none": e.get("why")})
 
     PREDICTION_AHEAD = dt.timedelta(hours=3)
     PREDICTION_SLACK = dt.timedelta(minutes=20)    # decide ticks are 30 min apart
