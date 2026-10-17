@@ -85,14 +85,17 @@ def _pump_line(obs: dict) -> str:
 def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage: str = "1",
              test: dict | None = None, room_label: str = "the house",
              notes: list[str] | None = None, gate: dict | None = None,
-             model: dict | None = None, rooms=None) -> list[str]:
+             model: dict | None = None, rooms=None, energy: dict | None = None) -> list[str]:
     """`test`: {"reason": ..., "ends": datetime} while a step test is in charge (it replaces
     the plan line). `room_label` names what `room_temp_mean` actually is. `notes` are the
     pump's own standing lines from config (what it is in the middle of), added before the
     stage line. `gate`: {"open", "reason", "dry_run", "enabled"} when the pump switches its
     room thermostats (gate.py). `model`: {"used", "heat_off", "setpoint", "reason"} when the
     model planner is live (0.5.0); while it is in charge it replaces the plan line. `rooms`:
-    the pump's rooms.Reading, to say which rooms are estimated or left out (0.6.0)."""
+    the pump's rooms.Reading, to say which rooms are estimated or left out (0.6.0).
+    `energy`: {"used", "live", "setpoint", "reason", "plan": EnergyPlan.summary() or None}
+    when the pump has an energy planner (0.7.0); in charge it replaces the plan line, as a
+    shadow it adds what it would do."""
     lines = []
 
     # --- house and weather
@@ -155,6 +158,13 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
                       f"leave the minimum flow at {msp:g} °C so the heating curve decides" if msp <= cfg.baseline
                       else f"set the minimum flow to {msp:g} °C")
             lines.append(f"The model planner {verb} {action} ({model.get('reason')}).")
+    elif energy and energy.get("used"):
+        verb = "would" if dry_run else "will"
+        esp = energy.get("setpoint")
+        action = ("hold the minimum flow" if esp is None else
+                  f"leave the minimum flow at {esp:g} °C so the heating curve decides" if esp <= cfg.baseline
+                  else f"set the minimum flow to {esp:g} °C")
+        lines.append(f"The energy planner {verb} {action} ({energy.get('reason')}).")
     elif sp is not None:
         if sp <= cfg.baseline:
             action = f"leave the minimum flow temperature at {sp:g} °C so the heating curve alone decides"
@@ -162,6 +172,15 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
             action = f"raise the minimum flow temperature to {sp:g} °C to push heat into the slab"
         verb = "would" if dry_run else "will"
         lines.append(f"The plan {verb} {action} ({reason}).")
+    ep = (energy or {}).get("plan")
+    if energy and not energy.get("used") and ep:
+        first = ep["plan"][0] if ep["plan"] else None
+        buys = (f"it would buy {ep['boosted_slots']} half-hours, the first at {first} °C" if first
+                else "the curve alone covers it, so it would buy nothing")
+        who = "Energy planner (shadow, not acting)" if not energy.get("live") else "Energy planner (no plan used this tick)"
+        lines.append(f"{who}: the next {ep['horizon_hours']:g} h need about {ep['need_kwh']:g} kWh of heat at "
+                     f"{ep['outside_mean']:g} °C outside on average; the curve gives about {ep['curve_kwh']:g}; {buys}, "
+                     f"for about £{ep['cost_gbp']:.2f}.")
     if gate and gate.get("open") is not None:
         state = "on" if gate["open"] else "off"
         if not gate.get("enabled", True):
@@ -184,6 +203,9 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
         fallback = "" if model.get("used") else " It has no plan right now, so the rule-based price planner is standing in."
         lines.append("Stage 2: the model planner is in charge. It simulates the slab and rooms against the weather, sun and price "
                      "forecasts and buys the cheapest heat that keeps the coldest room above the floor." + fallback)
+    elif energy and energy.get("used"):
+        lines.append("Stage 2: the energy planner is in charge. It works out the next day's heat from a heat-loss line "
+                     "fitted to last winter's data and buys what the heating curve doesn't give in the cheapest slots.")
     else:
         lines.append(f"Stage {stage}: rule-based Agile shifting. The house and COP models are not yet fitted; the 5-minute log is collecting the data.")
     return lines

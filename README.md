@@ -54,6 +54,15 @@ the next 24 h of Agile slots (never above `max_boost_price`), leave the heating 
 charge otherwise. It knows nothing about weather or the slab's lag, but it needs nothing
 but prices, so it is the fallback whenever the model planner has no plan.
 
+**Energy planner** (`energy.py`, 0.7.0). A simpler model for a slab too big and slow to
+simulate: the next day's heat is `heat_loss × (balance_point − mean forecast outside)`, a
+straight line fitted to a winter of daily heat (177: 0.37 kW/K below 13.3 °C, R² 0.81 over
+26 weeks). The curve's own share (`baseline_kw`) comes off; the rest is bought as
+upgrades of single half-hours to a higher min flow (32, then 38 °C, each with a measured
+heat output and COP), cheapest per kWh of heat first, never above `max_price`. A shadow
+unless `energy.live`. `baseline_kw` was measured in mild weather; the curve gives more when
+it is cold, so on cold days the plan overstates what it has to buy until that is refitted.
+
 **Model planner** (`mpc.py`, `shadow.py`). For each half-hour of the next 24, pick zone off or a
 minimum flow from a few levels (20, 25, 32, 38, 42 °C) so the coldest room stays above the
 comfort floor for the least `Σ price × Q / COP`. It is greedy: start with everything off,
@@ -107,6 +116,7 @@ usually coldest would make the house look warmer and the planner heat less.
 | `pump.py` | One heat pump: decide, reconcile and observe; publishes its sensors; calls its write script when the bus disagrees. No AppDaemon import |
 | `planner.py` | The price planner (stage 1 rules, and the fallback). Pure |
 | `mpc.py` | The model planner: greedy 24 h plan of zone off or a min-flow level per slot. Pure |
+| `energy.py` | The energy planner: the day's heat need from a fitted heat-loss line, bought in the cheapest half-hours. Pure |
 | `shadow.py` | Runs the model planner each tick: Kalman slab estimate, forecast cache, publishes the plan. Pure |
 | `forecast.py` | Met Office temperature and Solcast PV forecasts to half-hour slots, with offline fallbacks |
 | `testplan.py` | Step tests: fixed blocks of min flow or zone off, with floor and ceiling guards |
@@ -142,6 +152,7 @@ Tests are standalone scripts: `uv run tests/<name>.py` (`test_model.py` also nee
 | `test_ebusd.py` | Reply parsing, the `-f` flag, a dead bus returns a `Reading` instead of raising |
 | `test_reconcile.py` | An unreadable bus never causes a write; backoff slows but never stops; alerts fire on duration |
 | `test_forecast_mpc.py` | Forecast parsing and offline fallback; model planner keeps the room above the floor, banks heat in cheap slots, heats less with sun, nothing for a warm house, a sunny afternoon over the top doesn't block night heat (13 Oct 2026), deterministic; shadow filter and plan output |
+| `test_energy.py` | Energy planner: need from the forecast mean, the curve's share off, the cheapest slots bought, price cap and free slots, short price horizon, fallbacks, config refuses levels that break the greedy order |
 | `test_persist.py` | Saved state round-trips; a tripped step-test guard stays tripped across a restart; stale, corrupt or foreign state files are ignored |
 | `test_targets.py` | HA slider values override the comfort band and test guards; out-of-range, unparsable or upside-down values fall back to apps.yaml |
 | `test_testplan.py` | Step-test blocks start and end on schedule, "off" asks for the zone off, the floor guard trips and latches, the ceiling pauses a heat block and lets it resume 0.5 K under; the CSV log keeps one header per file |
@@ -163,8 +174,11 @@ fall back to a single gain term. COP fitted on a real aroTHERM hot-water run giv
 
 ### Don't fit to cloud data
 
-myVAILLANT cloud statistics are unusable for fitting: flow temperature was frozen in
-72 % of hourly buckets, and energy counters arrive in weekly lumps. Use ebusd readings.
+myVAILLANT cloud statistics are unusable for fitting a half-hourly model: flow temperature
+was frozen in 72 % of hourly buckets, and energy counters arrive in weekly lumps. Use ebusd
+readings. The daily energy buckets (`emf/v2/.../buckets?resolution=DAY`, 60 days per
+request) are another matter: 177's winter has no empty or lumped days, and its daily heat
+tracks outside temperature (r = −0.77), which is what the energy planner was fitted on.
 
 ## Writing over a flaky link
 

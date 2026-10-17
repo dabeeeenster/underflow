@@ -483,3 +483,43 @@ with tempfile.TemporaryDirectory() as tmp:
     q._restore_state()
     assert len(q._predictions) == len(p._predictions) > 0, (q._predictions, p._predictions)
 print("ok: the 3 h prediction is republished when its hour comes, and survives a restart")
+
+# --- energy planner (0.7.0): a shadow publishes and never drives; live drives with comfort on top
+import copy as _copy
+ECFG = {"heat_loss": 0.37, "balance_point": 13.3, "baseline_kw": 0.44, "baseline_cop": 3.6,
+        "levels": {32: {"kw": 1.2, "cop": 3.2}, 38: {"kw": 2.3, "cop": 2.8}}, "max_price": 0.20,
+        "weather": "weather.met_office_wood_green"}
+slot0 = NOW.replace(minute=0, second=0)
+erates = [(slot0 + dt.timedelta(minutes=30 * i), 0.08 if i < 2 else 0.25) for i in range(48)]
+emet = [(slot0 + dt.timedelta(hours=h), 8.0) for h in range(30)]
+for live in (False, True):
+    cfg2 = _copy.deepcopy(two)
+    cfg2["pumps"]["177"]["energy"] = dict(ECFG, live=live)
+    a = app(cfg2, dict(states, **{"sensor.tado_smart_thermostat_ru3769716224_current_temperature": "21.6"}))
+    a.forecasts = lambda weather, solcast: (emet, None)
+    p = a.pumps["177"]
+    p._rates = lambda: erates
+    p.planner_cfg.comfort_min = 20.0
+    p.decide()
+    st, at = a.published["sensor.underflow_177_energy_plan"]
+    assert st == "38.0" and at["live"] == str(live).lower() and at["boosted_slots"] == "2", (st, at)   # only 2 slots under the cap
+    assert "short" in at["notes"][-1] and a.published["sensor.underflow_177_energy_plan_need"][0] == str(round(0.37 * 5.3 * 24, 1))
+    text = a.published["sensor.underflow_177_whats_going_on"][1]["text"]
+    if live:
+        assert p.source == "energy" and p.desired == 38.0, (p.source, p.desired, p.source_reason)
+        assert "The energy planner would set the minimum flow to 38" in text, text   # the example is a dry run
+        assert "need 47 kWh, the curve gives 11, the plan buys 2 more, 35 kWh short" in p.source_reason, p.source_reason
+    else:
+        assert p.source == "planner", p.source
+        assert "Energy planner (shadow, not acting)" in text and "the first at 12:00 38" in text, text
+# live, cold room: comfort floor raises a curve slot to the boost
+cfg2 = _copy.deepcopy(two)
+cfg2["pumps"]["177"]["energy"] = dict(ECFG, live=True)
+a = app(cfg2, states)
+a.forecasts = lambda weather, solcast: (emet, None)
+p = a.pumps["177"]
+p._rates = lambda: [(s, 0.25) for s, _ in erates]          # all over the cap: nothing bought
+p.planner_cfg.comfort_min = 21.0
+p.decide()
+assert p.source == "energy" and p.desired == p.planner_cfg.boost and "raised to" in p.source_reason, (p.desired, p.source_reason)
+print("ok: energy planner shadow publishes only, live drives the min flow, comfort floor binds on top")

@@ -20,7 +20,8 @@ from narrative import describe, summary
 from hasafe import ha_safe
 from ebusd import MAX_CLOCK_SKEW, Ebusd
 from reconcile import ReconcileConfig, RegisterState, decide
-from demand import Held, MirrorConfig, choose, from_model, hold
+from demand import Held, MirrorConfig, choose, from_energy, from_model, hold
+from energy import EnergyConfig, plan_energy
 from shared import SharedConfig, shared_step
 from testplan import TestConfig, Step, test_step, current_block
 import gate as G
@@ -217,6 +218,19 @@ class Pump:
         self.shadow = SH.Shadow(scfg, float(mc.get("max_forecast_age_h", 6))) if scfg else None
         self._last_row = None
         self._last_shadow = None
+
+        # --- energy-signature planner (energy.py, 0.7.0): the day's heat need from a
+        # line fitted to a winter of daily data, bought in the cheapest slots. A shadow
+        # (publishes only) unless `energy.live`; the model planner beats it if both are live.
+        ec = cfg.get("energy")
+        self.energy_cfg = None
+        self.energy_entity = (ec or {}).get("entity", self.status_entity + "_energy_plan")
+        if ec:
+            try:
+                self.energy_cfg = EnergyConfig.from_args(ec)
+            except Exception as exc:
+                self.log(f"energy config rejected: {exc!r}", level="WARNING")
+        self._last_energy = None
         self._predictions = []     # [(made_at, for_at, coldest °C)]: 3 h predictions awaiting their hour
         self._write_at = None
 
@@ -467,6 +481,15 @@ class Pump:
                 why = ("no fitted parameters" if self.shadow is None else
                        "no room reading" if obs.get("room_temp_mean") is None else "no plan this tick")
                 reason = f"model planner unavailable ({why}), so the price planner: {reason}"
+        energy_out = self._energy_plan(obs, now, rates)
+        if self.energy_cfg and self.energy_cfg.live and source != "model":
+            e = from_energy(energy_out, obs.get("room_temp_mean"), self.planner_cfg)
+            if e is not None:
+                proposed, reason, urgent = e
+                source = "energy"
+                result = dict(result, urgent=urgent)
+            else:
+                reason = f"energy planner unavailable (no prices or temperature), so the price planner: {reason}"
 
         # A running step test overrides everything above, price included.
         self._update_step(obs, now)
@@ -547,7 +570,11 @@ class Pump:
         model = ({"used": self.source == "model", "heat_off": self.heat_off,
                   "setpoint": self.desired, "reason": self.source_reason}
                  if self.model_live else None)
-        lines = describe(obs, result, now, cfg, self.dry_run, test=test,
+        energy = ({"used": self.source == "energy", "live": self.energy_cfg.live, "setpoint": self.desired,
+                   "reason": self.source_reason,
+                   "plan": self._last_energy.summary() if self._last_energy else None}
+                  if self.energy_cfg is not None else None)
+        lines = describe(obs, result, now, cfg, self.dry_run, test=test, energy=energy,
                          rooms=self.room_reading,
                          room_label=self.args.get("room_label", "the house"),
                          notes=self.args.get("notes"), gate=gate, model=model)
@@ -762,6 +789,10 @@ class Pump:
                 row["gate_open"] = self.gate_open
                 row["gate_calling"] = sum(1 for e in self.gate_cfg.climates
                                           if self.get_state(e, attribute="hvac_action") == "heating")
+            if self.energy_cfg is not None:      # always both keys, so the CSV header holds
+                e = self._last_energy
+                row["energy_level"] = e.level_now if e else None
+                row["energy_need_kwh"] = round(e.need_kwh, 2) if e else None
             if self._last_shadow:
                 row["model_level"] = self._last_shadow.get("state")
                 row["model_pred_3h"] = self._last_shadow.get("predicted_coldest_3h")
@@ -910,6 +941,36 @@ class Pump:
         except Exception as exc:
             self.log(f"model plan failed: {exc!r}", level="WARNING")
             return None
+
+    def _energy_plan(self, obs, now, rates):
+        """Plan and publish this tick's energy plan (None without one)."""
+        cfg = self.energy_cfg
+        if cfg is None:
+            return None
+        role = "live" if cfg.live else "shadow"
+        try:
+            met, _ = self.app.forecasts(cfg.weather, []) if cfg.weather else (None, None)
+            p = plan_energy(rates, met, now, obs.get("outside_temp"), cfg)
+        except Exception as exc:
+            self.log(f"energy plan failed: {exc!r}", level="WARNING")
+            p = None
+        self._last_energy = p
+        attrs = {"friendly_name": f"{self.label} energy planner ({role})", "icon": "mdi:lightning-bolt-circle",
+                 "live": cfg.live, "updated": now.isoformat(timespec="seconds"),
+                 "heat_loss_kw_per_k": cfg.heat_loss, "balance_point": cfg.balance_point}
+        if p is None:
+            self._publish(self.energy_entity, "waiting", dict(attrs, reason="no prices, or no temperature at all"))
+            return None
+        s = p.summary()
+        self._publish(self.energy_entity, "curve" if p.level_now is None else p.level_now, dict(attrs, **s))
+        self._publish(f"{self.energy_entity}_need", s["need_kwh"], {
+            "friendly_name": f"{self.label} energy planner: heat needed over the horizon",
+            "unit_of_measurement": "kWh", "state_class": "measurement", "icon": "mdi:radiator",
+            "horizon_hours": s["horizon_hours"], "outside_mean": s["outside_mean"]})
+        self.log(f"energy ({role}): {s['level_now'] or 'curve'} now; need {s['need_kwh']} kWh over "
+                 f"{s['horizon_hours']} h at {s['outside_mean']} °C, curve {s['curve_kwh']}, bought "
+                 f"{s['boosted_slots']} slots, ~£{s['cost_gbp']}" + (f"; {'; '.join(s['notes'])}" if s["notes"] else ""))
+        return p
 
     PREDICTION_AHEAD = dt.timedelta(hours=3)
     PREDICTION_SLACK = dt.timedelta(minutes=20)    # decide ticks are 30 min apart

@@ -87,6 +87,27 @@ def _comfort(value: float, room_temp: float | None, cfg) -> tuple[float, str]:
     return value, ""
 
 
+def from_energy(plan, room_temp: float | None, cfg) -> tuple[float, str, bool] | None:
+    """The live energy planner's demand for now (energy.py): (min flow, reason, urgent),
+    or None without a plan, when the price planner stands in. A slot it didn't buy runs
+    on the curve (the baseline). The comfort band binds on top, as everywhere."""
+    if plan is None:
+        return None
+    lvl = plan.level_now
+    value = cfg.baseline if lvl is None else float(lvl)
+    short = f", {plan.shortfall_kwh:.0f} kWh short under the price cap" if plan.shortfall_kwh > 0.5 else ""
+    tally = (f"the next {plan.hours:g} h need {plan.need_kwh:.0f} kWh, the curve gives {plan.baseline_kwh:.0f}, "
+             f"the plan buys {plan.planned_kwh - plan.baseline_kwh:.0f} more{short}")
+    why = (f"energy planner: {lvl:g} °C in a bought slot; {tally}" if lvl is not None else
+           f"energy planner: curve only this slot; {tally}")
+    if room_temp is not None:
+        if room_temp <= cfg.comfort_min and value < cfg.boost:
+            return cfg.boost, f"{why}; raised to {cfg.boost:g} as the room is at {room_temp:.1f} °C", True
+        if room_temp >= cfg.comfort_max and value > cfg.baseline:
+            return cfg.baseline, f"{why}; cut to the curve as the room is at {room_temp:.1f} °C", True
+    return value, why, False
+
+
 def from_model(plan: dict | None, room_temp: float | None, cfg) -> tuple[float, bool, str, bool] | None:
     """The live model planner's demand for now: (min flow, heat_off, reason, urgent), or
     None if there is no usable plan, when the caller falls back to the price planner.

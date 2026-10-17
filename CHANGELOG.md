@@ -5,6 +5,25 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.7.0 — 2026-10-17
+
+- **Energy planner** (`energy.py`, new `energy:` block per pump). For a slab too slow to
+  simulate: the next day's heat need is a straight line in outside temperature,
+  `heat_loss × (balance_point − mean forecast)`, fitted to a winter of daily heat. 177's
+  line (17 Oct 2026): 0.37 kW/K below 13.3 °C, R² 0.81 over 26 weeks of myVAILLANT daily
+  data against Open-Meteo temperatures. The heating curve's own share (`baseline_kw`) comes
+  off; the rest is bought by raising single half-hours to a higher min flow (`levels`, each
+  with a measured heat output and COP), cheapest per kWh of heat first, never above
+  `max_price`, and the top level in free slots.
+  - A shadow by default: it publishes `sensor.<pump>_energy_plan` (level now, need, curve
+    share, slots bought, cost, notes) and `sensor.<pump>_energy_plan_need` (kWh), adds a
+    line to "what's going on", and logs `energy_level` / `energy_need_kwh` to the CSV.
+    With `energy.live: true` it drives the min flow (source `energy`), the comfort band
+    binding on top and the price planner standing in when it has no plan; the model
+    planner wins if both are live.
+  - `baseline_kw` is measured in mild weather; the curve gives more when it is cold, so
+    on cold days the plan overstates what it has to buy until that is refitted.
+
 ## 0.6.4 — 2026-10-17
 
 - **The model's 3 h prediction, lined up with what happened.** A new sensor,
