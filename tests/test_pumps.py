@@ -458,3 +458,28 @@ print("ok: comfort rooms estimated through a dropout; model planner live drives 
       "single-pump config unchanged, two pumps built and isolated, forbidden registers refused, "
       "a failing pump never stops the other, sliders routed, comfort on the coldest available room, "
       "thermostat gate decides, writes, holds and restores")
+
+# --- the 3 h prediction, published again when its hour comes (0.6.4) --------------------
+a = app(two, states)
+p = a.pumps["179"]
+ent = f"{p.model_entity}_predicted_for_now"
+p._publish_prediction_for_now(NOW, 21.4)
+assert a.published[ent][0] == "unavailable"                         # nothing made 3 h ago yet
+for k, v in enumerate((21.6, 21.8, 22.0, 22.2, 22.4), start=1):
+    p._publish_prediction_for_now(NOW + dt.timedelta(minutes=30 * k), v)
+p._publish_prediction_for_now(NOW + dt.timedelta(hours=3, seconds=4), 22.9)
+state, attrs = a.published[ent]
+assert state == "21.4" and attrs["predicted_at"] == NOW.isoformat(timespec="minutes"), (state, attrs)
+assert all(f >= NOW + dt.timedelta(hours=3) - p.PREDICTION_SLACK for _, f, _ in p._predictions)  # spent ones dropped
+p._publish_prediction_for_now(NOW + dt.timedelta(hours=3, minutes=30), None)          # a tick with no plan
+assert a.published[ent][0] == "21.6"
+# survives a restart through the state file
+with tempfile.TemporaryDirectory() as tmp:
+    p.state_file = os.path.join(tmp, "s.json")
+    p._save_state(NOW + dt.timedelta(hours=3, minutes=30))
+    q = app(two, states).pumps["179"]
+    q.state_file = p.state_file
+    q.datetime = lambda aware=True: NOW + dt.timedelta(hours=3, minutes=31)
+    q._restore_state()
+    assert len(q._predictions) == len(p._predictions) > 0, (q._predictions, p._predictions)
+print("ok: the 3 h prediction is republished when its hour comes, and survives a restart")

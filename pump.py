@@ -217,6 +217,7 @@ class Pump:
         self.shadow = SH.Shadow(scfg, float(mc.get("max_forecast_age_h", 6))) if scfg else None
         self._last_row = None
         self._last_shadow = None
+        self._predictions = []     # [(made_at, for_at, coldest °C)]: 3 h predictions awaiting their hour
         self._write_at = None
 
         self.desired = self._num(self.plan_entity)
@@ -790,6 +791,7 @@ class Pump:
                                                       "at": self.shadow.last_obs}
                 st["forecast"] = {"met": persist.series_out(c.met), "met_at": c.met_at,
                                   "sol": persist.series_out(c.sol), "sol_at": c.sol_at}
+                st["predictions"] = [[a.isoformat(), b.isoformat(), v] for a, b, v in self._predictions]
             persist.save(self.state_file, st, now)
         except Exception as exc:          # never let persistence take control down
             self.log(f"state save failed: {exc!r}", level="WARNING")
@@ -840,6 +842,10 @@ class Pump:
                 c.met, c.met_at = persist.series_in(fc.get("met")), persist._dt(fc.get("met_at"))
                 c.sol, c.sol_at = persist.series_in(fc.get("sol")), persist._dt(fc.get("sol_at"))
                 restored.append("forecasts")
+            preds = [(persist._dt(a), persist._dt(b), float(v)) for a, b, v in doc.get("predictions") or []]
+            self._predictions = [p for p in preds if p[0] and p[1]]
+            if self._predictions:
+                restored.append(f"{len(self._predictions)} pending predictions")
         except Exception as exc:
             self.log(f"saved state unusable ({exc!r}); starting fresh", level="WARNING")
             return None
@@ -896,6 +902,7 @@ class Pump:
                         "friendly_name": f"{self.label} model: {label}", "unit_of_measurement": "°C",
                         "device_class": "temperature", "state_class": "measurement",
                         "icon": "mdi:brain"})
+            self._publish_prediction_for_now(now, out.get("predicted_coldest_3h"))
             self.log(f"model ({role}): {state} now; coldest in 3 h {out.get('predicted_coldest_3h')} °C; "
                      f"24 h {out.get('elec_kwh_24h')} kWh £{out.get('cost_24h_gbp')}"
                      + (f"; {'; '.join(out['notes'])}" if out.get("notes") else ""))
@@ -903,6 +910,25 @@ class Pump:
         except Exception as exc:
             self.log(f"model plan failed: {exc!r}", level="WARNING")
             return None
+
+    PREDICTION_AHEAD = dt.timedelta(hours=3)
+    PREDICTION_SLACK = dt.timedelta(minutes=20)    # decide ticks are 30 min apart
+
+    def _publish_prediction_for_now(self, now, pred_3h):
+        """What the model said 3 h ago about now, so a graph lays prediction and outcome
+        on the same time axis (17 Oct 2026, Ben). `predicted_coldest_3h` is plotted at the
+        moment it was made, three hours before the room it is about."""
+        if pred_3h is not None:
+            self._predictions.append((now, now + self.PREDICTION_AHEAD, float(pred_3h)))
+        self._predictions = [p for p in self._predictions if p[1] >= now - self.PREDICTION_SLACK]
+        due = [p for p in self._predictions if abs(p[1] - now) <= self.PREDICTION_SLACK]
+        best = min(due, key=lambda p: abs(p[1] - now)) if due else None
+        self._publish(f"{self.model_entity}_predicted_for_now",
+                      round(best[2], 2) if best else "unavailable", {
+                          "friendly_name": f"{self.label} model: coldest room now, as predicted 3 h ago",
+                          "unit_of_measurement": "°C", "device_class": "temperature",
+                          "state_class": "measurement", "icon": "mdi:crystal-ball",
+                          "predicted_at": best[0].isoformat(timespec="minutes") if best else None})
 
     # ---- reconcile: make the register match ----------------------------
     def reconcile(self):

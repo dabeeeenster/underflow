@@ -5,6 +5,17 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.6.4 — 2026-10-17
+
+- **The model's 3 h prediction, lined up with what happened.** A new sensor,
+  `sensor.<pump>_model_plan_predicted_for_now` ("coldest room now, as predicted 3 h ago"),
+  republishes each `predicted_coldest_3h` when the hour it was about arrives (matched to
+  within 20 min; `unavailable` when there is none). Graphed with the actual coldest room,
+  the two lines sit on top of each other where the model is right; `predicted_coldest_3h`
+  is plotted at the moment it was made, three hours early. The pending predictions are
+  kept in the state file, so a restart doesn't leave a 3 h gap. The `predicted_at`
+  attribute says when it was made.
+
 ## 0.6.3 — 2026-10-17
 
 - **The step-test floor alert says what happened in plain words.** When the floor guard
