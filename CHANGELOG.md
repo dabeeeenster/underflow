@@ -5,6 +5,14 @@ while it is 0.x, a minor bump can change config. The running version is publishe
 `version` attribute of the status sensor (e.g. `sensor.underflow_179`) and shown on the
 dashboard.
 
+## 0.7.1 — 2026-10-17
+
+- "What's going on" no longer says the curve covers the day when the energy planner buys
+  nothing only because every slot left is over the price cap (first shadow plan on 177,
+  17 Oct 2026: 8.8 kWh needed, 5.9 from the curve, nothing under 20p until 23:00). It now
+  says so and gives the shortfall. The stage line says the energy planner is running as a
+  shadow instead of "the models are not yet fitted".
+
 ## 0.7.0 — 2026-10-17
 
 - **Energy planner** (`energy.py`, new `energy:` block per pump). For a slab too slow to

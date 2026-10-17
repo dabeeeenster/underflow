@@ -485,7 +485,7 @@ with tempfile.TemporaryDirectory() as tmp:
 print("ok: the 3 h prediction is republished when its hour comes, and survives a restart")
 
 # --- energy planner (0.7.0): a shadow publishes and never drives; live drives with comfort on top
-import copy as _copy
+import copy as _copy, dataclasses
 ECFG = {"heat_loss": 0.37, "balance_point": 13.3, "baseline_kw": 0.44, "baseline_cop": 3.6,
         "levels": {32: {"kw": 1.2, "cop": 3.2}, 38: {"kw": 2.3, "cop": 2.8}}, "max_price": 0.20,
         "weather": "weather.met_office_wood_green"}
@@ -512,6 +512,7 @@ for live in (False, True):
     else:
         assert p.source == "planner", p.source
         assert "Energy planner (shadow, not acting)" in text and "the first at 12:00 38" in text, text
+        assert "and still fall 34.6 kWh short under the price cap" in text and "running alongside as a shadow" in text, text
 # live, cold room: comfort floor raises a curve slot to the boost
 cfg2 = _copy.deepcopy(two)
 cfg2["pumps"]["177"]["energy"] = dict(ECFG, live=True)
@@ -520,6 +521,12 @@ a.forecasts = lambda weather, solcast: (emet, None)
 p = a.pumps["177"]
 p._rates = lambda: [(s, 0.25) for s, _ in erates]          # all over the cap: nothing bought
 p.planner_cfg.comfort_min = 21.0
+p.decide()
+p.energy_cfg = dataclasses.replace(p.energy_cfg, live=False)   # as a shadow, it says why it buys nothing
+p.decide()
+text = a.published["sensor.underflow_177_whats_going_on"][1]["text"]
+assert "every slot left is over the price cap, so it would buy nothing and fall" in text, text
+p.energy_cfg = dataclasses.replace(p.energy_cfg, live=True)
 p.decide()
 assert p.source == "energy" and p.desired == p.planner_cfg.boost and "raised to" in p.source_reason, (p.desired, p.source_reason)
 print("ok: energy planner shadow publishes only, live drives the min flow, comfort floor binds on top")

@@ -175,8 +175,12 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
     ep = (energy or {}).get("plan")
     if energy and not energy.get("used") and ep:
         first = ep["plan"][0] if ep["plan"] else None
+        short = ep.get("shortfall_kwh") or 0
         buys = (f"it would buy {ep['boosted_slots']} half-hours, the first at {first} °C" if first
-                else "the curve alone covers it, so it would buy nothing")
+                else f"every slot left is over the price cap, so it would buy nothing and fall {short:g} kWh short"
+                if short > 0.5 else "the curve alone covers it, so it would buy nothing")
+        if first and short > 0.5:
+            buys += f", and still fall {short:g} kWh short under the price cap"
         who = "Energy planner (shadow, not acting)" if not energy.get("live") else "Energy planner (no plan used this tick)"
         lines.append(f"{who}: the next {ep['horizon_hours']:g} h need about {ep['need_kwh']:g} kWh of heat at "
                      f"{ep['outside_mean']:g} °C outside on average; the curve gives about {ep['curve_kwh']:g}; {buys}, "
@@ -206,6 +210,9 @@ def describe(obs: dict, plan: dict, now: dt.datetime, cfg, dry_run: bool, stage:
     elif energy and energy.get("used"):
         lines.append("Stage 2: the energy planner is in charge. It works out the next day's heat from a heat-loss line "
                      "fitted to last winter's data and buys what the heating curve doesn't give in the cheapest slots.")
+    elif energy:
+        lines.append(f"Stage {stage}: rule-based Agile shifting, with the energy planner running alongside as a shadow "
+                     "until it has shown it gets the daily heat right.")
     else:
         lines.append(f"Stage {stage}: rule-based Agile shifting. The house and COP models are not yet fitted; the 5-minute log is collecting the data.")
     return lines
